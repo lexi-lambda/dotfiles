@@ -1,0 +1,9 @@
+.DS_Store
+
+# DrRacket temp files
+*~
+
+# Ruby rbenv configuration files
+.rbenv-version
+.ruby-version
+.rbenv-vars

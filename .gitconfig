@@ -1,0 +1,19 @@
+[push]
+	default = simple
+[core]
+	excludesfile = ~/.gitignore
+[alias]
+	ff = merge --ff-only
+	pff = pull --ff-only
+	tree = log --graph --decorate --oneline --all
+	co = checkout
+	deploy-to = "!bash -c '\
+			current_branch=\"$(git rev-parse --symbolic-full-name --abbrev-ref HEAD)\";\
+			deploy_to_branch=\"$1\";\
+			git checkout \"$deploy_to_branch\" && \
+			git merge \"$current_branch\" --ff-only && git push && \
+			git checkout \"$current_branch\"\
+		' --"
+	cob = checkout -b
+	pr = pull-request
+	wip = commit -m '🍆'
