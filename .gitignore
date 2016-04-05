@@ -7,3 +7,9 @@
 .rbenv-version
 .ruby-version
 .rbenv-vars
+
+# Haskell Stack
+.stack-work
+
+# Annoying npm error logs
+npm-debug.log
