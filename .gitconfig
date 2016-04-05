@@ -1,8 +1,10 @@
 [push]
 	default = simple
+	followTags = true
 [core]
 	excludesfile = ~/.gitignore
 [alias]
+	fp = fetch -p
 	ff = merge --ff-only
 	pff = pull --ff-only
 	tree = log --graph --decorate --oneline --all
