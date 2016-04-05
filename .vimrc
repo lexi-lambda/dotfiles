@@ -27,3 +27,6 @@ let vimpager_disable_ansiesc = 1
 " I find this annoying
 let vimpager_passthrough = 0
 
+" use the proper non-bright colors for diff syntax highlighting
+hi diffRemoved term=NONE ctermfg=001
+hi diffAdded term=NONE ctermfg=002
