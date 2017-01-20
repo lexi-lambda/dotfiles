@@ -1,0 +1,50 @@
+#!/usr/bin/env racket
+#lang racket/base
+
+(require racket/cmdline
+         racket/function
+         racket/match
+         racket/port
+         racket/system)
+
+(define paths '())
+
+(define-values [command args]
+  (command-line
+   #:multi
+   [("-p" "--path") p "directory to watch (can be specified multiple times)"
+                    (set! paths (cons p paths))]
+   #:args (command . arg)
+   (values command arg)))
+
+(when (null? paths)
+  (displayln "No paths to watch; specify a path using -p or --path." (current-error-port))
+  (exit 1))
+
+(define (dotfile? path)
+  (match-let-values ([(_ name _) (split-path path)])
+    (and (path? name)
+         (regexp-match? #px"^\\." name))))
+
+(define (recursive-change-evt path)
+  (apply choice-evt
+         (filesystem-change-evt path)
+         (for/list ([path* (in-directory path (negate dotfile?))]
+                    #:unless (dotfile? path*))
+           (filesystem-change-evt path*))))
+
+(define (paths-change-evt)
+  (apply choice-evt (map recursive-change-evt paths)))
+
+(let ([super (uncaught-exception-handler)])
+  (uncaught-exception-handler
+   (λ (exn)
+     (when (exn:break? exn) (newline) (exit))
+     (super exn))))
+
+(let loop ()
+  (displayln "Watching for changes; press Enter to force a rebuild.")
+  (sync (paths-change-evt) (read-line-evt (current-input-port)))
+  (apply system* (find-executable-path command) args)
+  (newline)
+  (loop))
