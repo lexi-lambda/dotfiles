@@ -7,10 +7,14 @@
          racket/port
          racket/system)
 
+(define ring-bell? #f)
 (define paths '())
 
 (define-values [command args]
   (command-line
+   #:once-each
+   [("--bell") "print the bell character each time the command completes"
+               (set! ring-bell? #t)]
    #:multi
    [("-p" "--path") p "directory to watch (can be specified multiple times)"
                     (set! paths (cons p paths))]
@@ -46,5 +50,6 @@
   (displayln "Watching for changes; press Enter to force a rebuild.")
   (sync (paths-change-evt) (read-line-evt (current-input-port)))
   (apply system* (find-executable-path command) args)
+  (when ring-bell? (display #\u7))
   (newline)
   (loop))
