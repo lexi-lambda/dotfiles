@@ -48,7 +48,10 @@
 
 (let loop ()
   (displayln "Watching for changes; press Enter to force a rebuild.")
-  (sync (paths-change-evt) (read-line-evt (current-input-port)))
+  (let ([cust (make-custodian)])
+    (parameterize ([current-custodian cust])
+      (sync (paths-change-evt) (read-line-evt (current-input-port))))
+    (custodian-shutdown-all cust))
   (apply system* (find-executable-path command) args)
   (when ring-bell? (display #\u7))
   (newline)
