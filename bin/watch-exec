@@ -7,7 +7,12 @@
          racket/port
          racket/system)
 
+(define git-executable (find-executable-path "git"))
+(define git-available? (and git-executable #t))
+
 (define ring-bell? #f)
+(define ignore-dotfiles? #t)
+(define ignore-vcs? git-available?)
 (define paths '())
 
 (define-values [command args]
@@ -15,6 +20,16 @@
    #:once-each
    [("--bell") "print the bell character each time the command completes"
                (set! ring-bell? #t)]
+   #:once-any
+   [("--ignore-dotfiles") "do not include dotfiles (and files inside them) in the watch (default)"
+                          (set! ignore-dotfiles? #t)]
+   [("--no-ignore-dotfiles") "include dotfiles (and files inside them) in the watch"
+                             (set! ignore-dotfiles? #f)]
+   #:once-any
+   [("--ignore-vcs") "do not include files ignored by git in the watch (default if ‘git’ is in PATH)"
+                     (set! ignore-vcs? #t)]
+   [("--no-ignore-vcs") "include files ignored by git in the watch"
+                        (set! ignore-vcs? #f)]
    #:multi
    [("-p" "--path") p "directory to watch (can be specified multiple times)"
                     (set! paths (cons p paths))]
@@ -22,19 +37,46 @@
    (values command arg)))
 
 (when (null? paths)
-  (displayln "No paths to watch; specify a path using -p or --path." (current-error-port))
+  (displayln "error: No paths to watch; specify a path using -p or --path." (current-error-port))
+  (exit 1))
+
+(when (and ignore-vcs? (not git-available?))
+  (displayln "error: --ignore-vcs was specified, but could not find ‘git’ executable in PATH."
+             (current-error-port))
   (exit 1))
 
 (define (dotfile? path)
   (match-let-values ([(_ name _) (split-path path)])
-    (and (path? name)
+    (and (path-string? name)
          (regexp-match? #px"^\\." name))))
+
+(define gitignored?
+  (if ignore-vcs?
+      (match-let ([response-regexp (byte-pregexp #"^([^\0]*)\0([^\0]*)\0([^\0]*)\0([^\0]*)\0")]
+                  [(list stdout stdin _ _ _)
+                   (process*/ports #f #f (current-error-port)
+                                   git-executable "check-ignore" "--stdin" "-zvn")]
+                  [lock (make-semaphore 1)])
+        (λ (path)
+          (call-with-semaphore
+           lock
+           (thunk (fprintf stdin "~a\0" (path->string path))
+                  (flush-output stdin)
+                  (match (regexp-match response-regexp stdout)
+                    [(list _ #"" #"" #"" _) #f]
+                    [(list _ _   _   _   _) #t])))))
+      (λ (path) (error 'gitignored? "internal error"))))
+
+(define (ignored? path)
+  (or (and ignore-dotfiles? (dotfile? path))
+      (and ignore-vcs? (gitignored? path))))
 
 (define (recursive-change-evt path)
   (apply choice-evt
          (filesystem-change-evt path)
-         (for/list ([path* (in-directory path (negate dotfile?))]
-                    #:unless (dotfile? path*))
+         (for/list ([path* (in-directory path (negate ignored?))]
+                    #:unless (ignored? path*)
+                    #:when (directory-exists? path*))
            (filesystem-change-evt path*))))
 
 (define (paths-change-evt)
@@ -47,10 +89,11 @@
      (super exn))))
 
 (let loop ()
-  (displayln "Watching for changes; press Enter to force a rebuild.")
   (let ([cust (make-custodian)])
     (parameterize ([current-custodian cust])
-      (sync (paths-change-evt) (read-line-evt (current-input-port))))
+      (let ([paths-evt (paths-change-evt)])
+        (displayln "Watching for changes; press Enter to force a rebuild.")
+        (sync paths-evt (read-line-evt (current-input-port)))))
     (custodian-shutdown-all cust))
   (apply system* (find-executable-path command) args)
   (when ring-bell? (display #\u7))
