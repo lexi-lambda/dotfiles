@@ -75,8 +75,7 @@
   (apply choice-evt
          (filesystem-change-evt path)
          (for/list ([path* (in-directory path (negate ignored?))]
-                    #:unless (ignored? path*)
-                    #:when (directory-exists? path*))
+                    #:unless (ignored? path*))
            (filesystem-change-evt path*))))
 
 (define (paths-change-evt)
