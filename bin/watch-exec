@@ -3,8 +3,10 @@
 
 (require racket/cmdline
          racket/function
+         racket/list
          racket/match
          racket/port
+         racket/set
          racket/system)
 
 (define git-executable (find-executable-path "git"))
@@ -36,7 +38,7 @@
    #:args (command . arg)
    (values command arg)))
 
-(when (null? paths)
+(when (empty? paths)
   (displayln "error: No paths to watch; specify a path using -p or --path." (current-error-port))
   (exit 1))
 
@@ -71,15 +73,27 @@
   (or (and ignore-dotfiles? (dotfile? path))
       (and ignore-vcs? (gitignored? path))))
 
-(define (recursive-change-evt path)
-  (apply choice-evt
-         (filesystem-change-evt path)
-         (for/list ([path* (in-directory path (negate ignored?))]
-                    #:unless (ignored? path*))
-           (filesystem-change-evt path*))))
+(define (find-paths-to-watch path)
+  (cons path
+        (for/list ([path* (in-directory path (negate ignored?))]
+                   #:unless (ignored? path*))
+          path*)))
 
-(define (paths-change-evt)
-  (apply choice-evt (map recursive-change-evt paths)))
+(define (paths-to-watch)
+  (remove-duplicates (append-map find-paths-to-watch paths)))
+
+(define (paths-timestamps paths)
+  (for/hash ([path (in-list paths)])
+    (values path (if (directory-exists? path) 'directory
+                     (file-or-directory-modify-seconds path)))))
+
+(define (paths-changed stamps-a stamps-b)
+  (let ([changed-paths (set-symmetric-difference (hash-keys stamps-a) (hash-keys stamps-b))]
+        [unchanged-paths (set-intersect (hash-keys stamps-a) (hash-keys stamps-b))])
+    (append changed-paths
+            (filter-not (λ (path) (equal? (hash-ref stamps-a path)
+                                          (hash-ref stamps-b path)))
+                        unchanged-paths))))
 
 (let ([super (uncaught-exception-handler)])
   (uncaught-exception-handler
@@ -87,14 +101,29 @@
      (when (exn:break? exn) (newline) (exit))
      (super exn))))
 
-(let loop ()
-  (let ([cust (make-custodian)])
-    (parameterize ([current-custodian cust])
-      (let ([paths-evt (paths-change-evt)])
-        (displayln "Watching for changes; press Enter to force a rebuild.")
-        (sync paths-evt (read-line-evt (current-input-port)))))
-    (custodian-shutdown-all cust))
-  (apply system* (find-executable-path command) args)
-  (when ring-bell? (display #\u7))
-  (newline)
-  (loop))
+(let ([starting-paths (paths-to-watch)])
+  (let loop ([watched-paths starting-paths]
+             [watched-paths-stamps (paths-timestamps starting-paths)])
+    (define-values [new-paths new-paths-stamps]
+      (let continue ([display-message? #t]
+                     [watched-paths watched-paths]
+                     [watched-paths-stamps watched-paths-stamps])
+        (let* ([cust (make-custodian)]
+               [paths-evt (parameterize ([current-custodian cust])
+                            (apply choice-evt (map filesystem-change-evt watched-paths)))])
+          (when display-message?
+            (displayln "Watching for changes; press Enter to force a rebuild."))
+          (sync paths-evt (read-line-evt (current-input-port)))
+          (custodian-shutdown-all cust)
+          (let* ([new-paths (paths-to-watch)]
+                 [new-paths-stamps (paths-timestamps new-paths)]
+                 [changed-paths (paths-changed watched-paths-stamps new-paths-stamps)])
+            (if (empty? changed-paths)
+                ; If none of the paths we care about actually changed, don’t rebuild, just start
+                ; watching again.
+                (continue #f new-paths new-paths-stamps)
+                (values new-paths new-paths-stamps))))))
+    (apply system* (find-executable-path command) args)
+    (when ring-bell? (display #\u7))
+    (newline)
+    (loop new-paths new-paths-stamps)))
