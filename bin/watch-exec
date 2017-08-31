@@ -113,16 +113,19 @@
                             (apply choice-evt (map filesystem-change-evt watched-paths)))])
           (when display-message?
             (displayln "Watching for changes; press Enter to force a rebuild."))
-          (sync paths-evt (read-line-evt (current-input-port)))
-          (custodian-shutdown-all cust)
-          (let* ([new-paths (paths-to-watch)]
-                 [new-paths-stamps (paths-timestamps new-paths)]
-                 [changed-paths (paths-changed watched-paths-stamps new-paths-stamps)])
-            (if (empty? changed-paths)
-                ; If none of the paths we care about actually changed, don’t rebuild, just start
-                ; watching again.
-                (continue #f new-paths new-paths-stamps)
-                (values new-paths new-paths-stamps))))))
+          (let ([rebuild-request
+                 (sync (wrap-evt paths-evt (const 'file-changed))
+                       (wrap-evt (read-line-evt (current-input-port)) (const 'enter)))])
+            (custodian-shutdown-all cust)
+            (let* ([new-paths (paths-to-watch)]
+                   [new-paths-stamps (paths-timestamps new-paths)]
+                   [changed-paths (paths-changed watched-paths-stamps new-paths-stamps)])
+              (if (and (eq? 'file-changed rebuild-request)
+                       (empty? changed-paths))
+                  ; If none of the paths we care about actually changed, don’t rebuild, just start
+                  ; watching again.
+                  (continue #f new-paths new-paths-stamps)
+                  (values new-paths new-paths-stamps)))))))
     (apply system* (find-executable-path command) args)
     (when ring-bell? (display #\u7))
     (newline)
