@@ -19,6 +19,9 @@
 
 (define-values [command args]
   (command-line
+   #:multi
+   [("--path" "-p") path "directory to watch (can be specified multiple times)"
+                    (set! paths (cons path paths))]
    #:once-each
    [("--bell") "print the bell character each time the command completes"
                (set! ring-bell? #t)]
@@ -32,9 +35,6 @@
                      (set! ignore-vcs? #t)]
    [("--no-ignore-vcs") "include files ignored by git in the watch"
                         (set! ignore-vcs? #f)]
-   #:multi
-   [("-p" "--path") p "directory to watch (can be specified multiple times)"
-                    (set! paths (cons p paths))]
    #:args (command . arg)
    (values command arg)))
 
@@ -82,6 +82,11 @@
 (define (paths-to-watch)
   (remove-duplicates (append-map find-paths-to-watch paths)))
 
+(define (paths-change-evt paths)
+  (apply choice-evt (filter-map (λ (path) (with-handlers ([exn:fail:filesystem? (const #f)])
+                                            (filesystem-change-evt path)))
+                                paths)))
+
 (define (paths-timestamps paths)
   (for/hash ([path (in-list paths)])
     (values path (if (directory-exists? path) 'directory
@@ -109,13 +114,13 @@
                      [watched-paths watched-paths]
                      [watched-paths-stamps watched-paths-stamps])
         (let* ([cust (make-custodian)]
-               [paths-evt (parameterize ([current-custodian cust])
-                            (apply choice-evt (map filesystem-change-evt watched-paths)))])
+               [rebuild-evt
+                (parameterize ([current-custodian cust])
+                  (choice-evt (wrap-evt (paths-change-evt watched-paths) (const 'file-changed))
+                              (wrap-evt (read-line-evt (current-input-port)) (const 'enter))))])
           (when display-message?
             (displayln "Watching for changes; press Enter to force a rebuild."))
-          (let ([rebuild-request
-                 (sync (wrap-evt paths-evt (const 'file-changed))
-                       (wrap-evt (read-line-evt (current-input-port)) (const 'enter)))])
+          (let ([rebuild-request (sync rebuild-evt)])
             (custodian-shutdown-all cust)
             (let* ([new-paths (paths-to-watch)]
                    [new-paths-stamps (paths-timestamps new-paths)]
