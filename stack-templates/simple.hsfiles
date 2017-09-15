@@ -1,0 +1,91 @@
+{-# START_FILE package.yaml #-}
+name: {{ name }}
+version: '0.0.0'
+category: Other
+synopsis: A new package.
+description: {{ name }} is a new package.
+maintainer: {{author-name}}{{^author-name}}Author name here{{/author-name}}
+
+extra-source-files:
+- package.yaml
+- README.md
+- stack.yaml
+
+ghc-options: -Wall
+default-extensions:
+- ApplicativeDo
+- ConstraintKinds
+- DefaultSignatures
+- DeriveGeneric
+- ExistentialQuantification
+- FlexibleContexts
+- FlexibleInstances
+- FunctionalDependencies
+- GADTs
+- GeneralizedNewtypeDeriving
+- KindSignatures
+- LambdaCase
+- MultiParamTypeClasses
+- NamedFieldPuns
+- OverloadedStrings
+- RankNTypes
+- ScopedTypeVariables
+- StandaloneDeriving
+- TupleSections
+- TypeApplications
+- TypeOperators
+
+library:
+  dependencies:
+  - base
+  source-dirs: src
+
+executables:
+  {{ name }}:
+    dependencies:
+    - base
+    - {{ name }}
+    ghc-options:
+    - -rtsopts
+    - -threaded
+    - -with-rtsopts=-N
+    main: Main.hs
+    source-dirs: executable
+
+tests:
+  {{ name }}-test-suite:
+    dependencies:
+    - base
+    - {{ name }}
+    - hspec
+    ghc-options:
+    - -rtsopts
+    - -threaded
+    - -with-rtsopts=-N
+    main: Main.hs
+    source-dirs: test
+
+{-# START_FILE .gitignore #-}
+# Stack uses this directory as scratch space.
+/.stack-work/
+# Stack generates the Cabal file from `package.yaml` through hpack.
+/*.cabal
+
+{-# START_FILE README.md #-}
+# {{ name }}
+
+{-# START_FILE Setup.hs #-}
+-- This script is used to build and install your package. Typically you don't
+-- need to change it. The Cabal documentation has more information about this
+-- file: <https://www.haskell.org/cabal/users-guide/installing-packages.html>.
+import qualified Distribution.Simple
+
+main :: IO ()
+main = Distribution.Simple.defaultMain
+
+{-# START_FILE executable/Main.hs #-}
+main :: IO ()
+main = return ()
+
+{-# START_FILE test/Main.hs #-}
+{-# OPTIONS_GHC -F -pgmF hspec-discover #-}
