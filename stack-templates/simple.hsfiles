@@ -50,6 +50,8 @@ default-extensions:
 - StandaloneDeriving
 - TupleSections
 - TypeApplications
+- TypeFamilies
+- TypeFamilyDependencies
 - TypeOperators
 
 dependencies:
