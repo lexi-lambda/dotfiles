@@ -20,7 +20,7 @@
 (define-values [command args]
   (command-line
    #:multi
-   [("--path" "-p") path "directory to watch (can be specified multiple times)"
+   [("--path" "-p") path "file or directory to watch (can be specified multiple times)"
                     (set! paths (cons path paths))]
    #:once-each
    [("--bell") "print the bell character each time the command completes"
@@ -75,9 +75,11 @@
 
 (define (find-paths-to-watch path)
   (cons path
-        (for/list ([path* (in-directory path (negate ignored?))]
-                   #:unless (ignored? path*))
-          path*)))
+        (if (directory-exists? path)
+            (for/list ([path* (in-directory path (negate ignored?))]
+                       #:unless (ignored? path*))
+              path*)
+            '())))
 
 (define (paths-to-watch)
   (remove-duplicates (append-map find-paths-to-watch paths)))
