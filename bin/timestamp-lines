@@ -1,0 +1,232 @@
+#!/usr/bin/env racket
+#lang racket/base
+
+(require gregor
+         gregor/period
+         racket/format
+         racket/list
+         racket/match)
+
+(define (~r/2 v) (~r v #:min-width 2 #:pad-string "0"))
+
+(define (timestamp start-time #:current-time [current-time (now)] #:mode mode)
+  (define (absolute-timestamp)
+    (~t current-time "HH:mm:ss"))
+
+  (define (relative-timestamp)
+    (define current-period (time-period-between start-time current-time))
+    (~a "+" (~r/2 (period-ref current-period 'hours))
+        ":" (~r/2 (period-ref current-period 'minutes))
+        ":" (~r/2 (period-ref current-period 'seconds))))
+
+  (define timestamp-str
+    (match mode
+      ['absolute (absolute-timestamp)]
+      ['relative (relative-timestamp)]
+      ['both (~a (absolute-timestamp) " " (relative-timestamp))]))
+
+  (~a "[" timestamp-str "]"))
+
+(define (timestamp-lines #:mode mode
+                         #:input [in (current-input-port)]
+                         #:output [out (current-output-port)]
+                         #:close? [close? #t])
+  (define start-time (now))
+  (define (current-timestamp)
+    (timestamp start-time #:mode mode))
+  (define (write-timestamp [str (current-timestamp)])
+    (write-string str out)
+    (write-string " " out))
+
+  (define buffer (make-bytes 512))
+
+  (for/fold ([at-start-of-line? #t]
+             #:result (void))
+            ([num-bytes (in-producer (λ () (read-bytes-avail! buffer in)) eof-object?)])
+    (match-define (cons first-line other-lines) (regexp-split #rx#"\n" buffer 0 num-bytes))
+    (when at-start-of-line?
+      (write-timestamp))
+    (write-bytes first-line out)
+    (cond
+      [(empty? other-lines)
+       #f]
+      [else
+       (newline out)
+       (define last-line
+         (match other-lines
+           [(list only-line)
+            only-line]
+           [(list middle-lines ... last-line)
+            (define timestamp-str (timestamp start-time #:mode mode))
+            (for ([line (in-list middle-lines)])
+              (write-timestamp timestamp-str)
+              (write-bytes line out)
+              (newline out))
+            last-line]))
+       (cond
+         [(zero? (bytes-length last-line))]
+         [else
+          (write-timestamp)
+          (write-bytes last-line out)])]))
+
+  (when close?
+    (close-output-port out)))
+
+(module+ main
+  (require racket/cmdline)
+
+  (define mode 'absolute)
+
+  (command-line
+   #:once-any
+   ["--absolute"
+    "Print absolute timestamps using the system clock (default)"
+    (set! mode 'absolute)]
+   ["--relative"
+    "Print timestamps relative to process startup"
+    (set! mode 'relative)]
+   ["--both"
+    "Print both absolute and relative timestamps"
+    (set! mode 'both)])
+
+  (timestamp-lines #:mode mode))
+
+(module+ test
+  (require (for-syntax racket/base)
+           racket/port
+           racket/stxparam
+           rackunit
+           syntax/parse/define)
+
+  (define (read-all-bytes-avail in
+                                [initial-buffer-size 256]
+                                #:on-eof [on-eof values])
+    (let loop ([buffer (make-bytes initial-buffer-size)]
+               [buffer-position 0]
+               [buffer-size initial-buffer-size])
+      (define num-bytes (read-bytes-avail!* buffer in buffer-position))
+      (cond
+        [(or (eof-object? num-bytes) (zero? num-bytes))
+         (define result (bytes->immutable-bytes (subbytes buffer 0 buffer-position)))
+         (if (eof-object? num-bytes) (on-eof result) result)]
+        [else
+         (define new-pos (+ buffer-position num-bytes))
+         (cond
+           [(= new-pos buffer-size)
+            (define new-buffer-size (* 2 buffer-size))
+            (define new-buffer (make-bytes new-buffer-size))
+            (bytes-copy! new-buffer 0 buffer)
+            (loop new-buffer buffer-position new-buffer-size)]
+           [else
+            (loop buffer buffer-position buffer-size)])])))
+
+  (define (call-with-resource #:construct constructor #:destruct destructor proc)
+    (call-with-continuation-barrier
+     (λ ()
+       (define vals (call-with-values (λ () (constructor)) list))
+       (dynamic-wind
+        void
+        (λ () (apply proc vals))
+        (λ () (apply destructor vals))))))
+
+  (define (call-with-pipe proc)
+    (call-with-resource
+     #:construct make-pipe
+     #:destruct (λ (in out) (close-input-port in) (close-output-port out))
+     proc))
+
+  (define (call-with-custodian proc)
+    (call-with-resource
+     #:construct make-custodian
+     #:destruct custodian-shutdown-all
+     (λ (cust) (parameterize ([current-custodian cust])
+                 (proc)))))
+
+  (define (call-with-clock proc)
+    (define clock (datetime 0 1 1 12 10 30))
+    (define (advance-clock! period)
+      (set! clock (+period clock period)))
+    (parameterize ([current-timezone "Etc/UTC"]
+                   [current-clock (λ () (->posix clock))])
+      (proc advance-clock!)))
+
+  (define-syntax (test-case-keyword stx)
+    (raise-syntax-error #f "cannot be used outside of test case" stx))
+  (define-rename-transformer-parameter advance-clock! (make-rename-transformer #'test-case-keyword))
+  (define-rename-transformer-parameter write+read! (make-rename-transformer #'test-case-keyword))
+
+  (define (call-with-timestamp-lines #:mode mode proc)
+    (call-with-custodian
+     (λ ()
+       (call-with-pipe
+        (λ (stdin-in stdin-out)
+          (call-with-pipe
+           (λ (stdout-in stdout-out)
+             (define (write+read!-proc in-bytes expected-response-length)
+               (write-bytes in-bytes stdin-out)
+               (sync (read-bytes-evt expected-response-length stdout-in)
+                     (wrap-evt (alarm-evt (+ (current-inexact-milliseconds) 100))
+                               (λ (evt)
+                                 (define avail
+                                   (read-all-bytes-avail stdout-in
+                                                         #:on-eof (λ (avail) `#s(eof ,avail))))
+                                 (if (bytes? avail)
+                                     `#s(timeout ,avail)
+                                     avail)))))
+             (call-with-clock
+              (λ (advance-clock!-proc)
+                (thread (λ () (timestamp-lines #:mode mode #:input stdin-in #:output stdout-out)))
+                (proc advance-clock!-proc write+read!-proc)
+                (close-output-port stdin-out)
+                (port->bytes stdout-in))))))))))
+
+  (define-syntax-parser timestamp-lines-test-case
+    [(_ #:mode mode:expr body ...+)
+     #`(test-begin
+        (define leftovers
+          (call-with-timestamp-lines
+           #:mode mode
+           (λ (advance-clock!-proc write+read!-proc)
+             (syntax-parameterize
+                 ([advance-clock! (make-rename-transformer #'advance-clock!-proc)]
+                  [write+read! (make-rename-transformer #'write+read!-proc)])
+               body ...))))
+        #,(syntax/loc this-syntax
+            (check-equal? leftovers #"" "Data left at end of port")))])
+
+  (define-syntax-parser check-write+read!
+    [(_ in-bytes:expr expected-response-expr:expr)
+     #`(let ([expected-response expected-response-expr])
+         #,(syntax/loc this-syntax
+             (check-equal? (write+read! in-bytes (bytes-length expected-response))
+                           expected-response)))])
+
+  (timestamp-lines-test-case
+   #:mode 'absolute
+   (check-write+read! #"hello" #"[12:10:30] hello"))
+  (timestamp-lines-test-case
+   #:mode 'relative
+   (check-write+read! #"hello" #"[+00:00:00] hello"))
+  (timestamp-lines-test-case
+   #:mode 'both
+   (check-write+read! #"hello" #"[12:10:30 +00:00:00] hello"))
+
+  (timestamp-lines-test-case
+   #:mode 'relative
+   (check-write+read! #"hello\n" #"[+00:00:00] hello\n"))
+  (timestamp-lines-test-case
+   #:mode 'relative
+   (check-write+read! #"hello\ngoodbye" #"[+00:00:00] hello\n[+00:00:00] goodbye"))
+  (timestamp-lines-test-case
+   #:mode 'relative
+   (check-write+read! #"hello\ngoodbye\n" #"[+00:00:00] hello\n[+00:00:00] goodbye\n"))
+
+  (timestamp-lines-test-case
+   #:mode 'relative
+   (check-write+read! #"\n\n\n" #"[+00:00:00] \n[+00:00:00] \n[+00:00:00] \n"))
+
+  (timestamp-lines-test-case
+   #:mode 'both
+   (check-write+read! #"hello\n" #"[12:10:30 +00:00:00] hello\n")
+   (advance-clock! (period (hours 1) (minutes 2) (seconds 3)))
+   (check-write+read! #"goodbye\n" #"[13:12:33 +01:02:03] goodbye\n")))
