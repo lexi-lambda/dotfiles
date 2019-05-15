@@ -1,24 +1,39 @@
+if status is-login
+  for dir_var in CODE_HOME DOTFILES_HOME RACKET_HOME
+    set -l dir "$$dir_var"
+    if [ ! -d "$dir" ]
+      log-msg -l warning "value ‘$dir’ for $dir_var is not a directory"
+    end
+  end
 
-set -x PAGER "vimpager -c 'source ~/.vimrc'"
+  for extra_path in ~/.local/bin
+    if [ -d "$extra_path" ]
+      set -gxp PATH "$extra_path"
+    end
+  end
 
-alias ls 'ls -p'
-alias tree 'tree -C'
-alias grep 'grep --color=auto'
+  set -gxp PATH "$DOTFILES_HOME"/bin "$RACKET_HOME"/bin
 
-set -x CLICOLOR 1
-set -x LSCOLORS 'gxfxcxdxbxegedabaggxgx'
+  set -gx PLTCOMPILEDROOTS 'compiled/@(version):'
 
-set -x fish_color_command cyan
-set -x fish_color_param normal
-set -x fish_color_quote green
-set -x fish_color_end red
-set -x fish_color_operator blue
+  if type -qP vimpager
+    set -gx PAGER "vimpager -c 'source ~/.vimrc'"
+  end
 
-set -x NODE_PATH '/usr/local/lib/node_modules'
+  set -gx CLICOLOR 1
+  set -gx LSCOLORS 'gxfxcxdxbxegedabaggxgx'
+end
 
-# install rbenv shims
-set -gx RBENV_ROOT /usr/local/var/rbenv
-status --is-interactive; and . (rbenv init -|psub)
+set -g fish_color_command cyan
+set -g fish_color_end red
+set -g fish_color_error red --bold
+set -g fish_color_escape yellow
+set -g fish_color_operator blue
+set -g fish_color_param normal
+set -g fish_color_quote green
+set -g fish_color_redirection red
 
-# install nvm shims
-set -gx NVM_DIR=~/.nvm
+abbr -ag co git checkout
+abbr -ag cob git checkout -b
+abbr -ag gh hub browse
+abbr -ag st git status -uall

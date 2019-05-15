@@ -1,15 +1,5 @@
-.DS_Store
+fish/conf.d/local/
+fish/fish_variables
 
-# DrRacket temp files
+compiled/
 *~
-
-# Ruby rbenv configuration files
-.rbenv-version
-.ruby-version
-.rbenv-vars
-
-# Haskell Stack
-.stack-work
-
-# Annoying npm error logs
-npm-debug.log
