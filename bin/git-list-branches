@@ -1,0 +1,47 @@
+#!/usr/bin/env fish
+
+# like `git branch --list`, but outputs in a more regular format
+# (without marking `HEAD` with an asterisk or indenting branch names)
+
+argparse -n 'git list-branches' -x l,f -x r,a \
+  'l/long' 'f/format=' \
+  'r/remote' 'a/all' \
+  'i/ignore-case' \
+  -- $argv
+or exit 1
+
+set -l format_color "\
+%(if)%(HEAD)%(then)%(color:green)%(end)\
+%(if:equals=refs/remotes)%(refname:rstrip=-2)%(then)%(color:red)%(end)"
+
+set -l opts
+set -l args
+
+if set -lq _flag_long
+  set -a opts --format "$format_color%(refname)"
+else if set -lq _flag_format
+  set -a opts --format "$_flag_format"
+else
+  set -a opts --format "$format_color%(refname:short)"
+end
+
+if set -lq _flag_ignore_case
+  set -a opts --ignore-case
+end
+
+set -l reftypes
+if set -lq _flag_remote
+  set reftypes remotes
+else if set -lq _flag_all
+  set reftypes heads remotes
+else
+  set reftypes heads
+end
+
+if [ (count $argv) -eq 0 ]
+  set args refs/$reftypes
+else
+  set args refs/$reftypes/$argv
+end
+
+exec git for-each-ref $opts -- $args
