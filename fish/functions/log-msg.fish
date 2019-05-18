@@ -3,6 +3,7 @@ function log-msg
     'n/name=' \
     'l/level=!__log-msg__validate-level' \
     -- $argv
+  or return 1
 
   set -l name
   if set -q _flag_name

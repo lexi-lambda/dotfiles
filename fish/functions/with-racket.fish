@@ -1,5 +1,6 @@
 function with-racket -d 'Parameterize the Racket version for a command'
   argparse -n with-racket -x l,e l/list e/eval -- $argv
+  or return 1
 
   if set -q _flag_list
     if [ (count $argv) -gt 0 ]
