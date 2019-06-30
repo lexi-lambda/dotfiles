@@ -1,0 +1,299 @@
+#!/usr/bin/env racket
+#lang reader (submod "support/lang/script.rkt" reader)
+(require-os! '(unix macosx))
+
+(require racket/cmdline
+         racket/format
+         racket/list
+         racket/match
+         racket/path
+         racket/port
+         racket/stream
+         racket/string
+         racket/system
+         (only-in ffi/unsafe compiler-sizeof)
+         threading)
+
+(define environment (current-environment-variables))
+
+; When computing sizes, we need to factor in extra bytes for C strings’ NUL terminators, and we also
+; have to consider the amount of space for any pointers in `environ` or `argv`.
+(define (bytes-length/nul bstr)
+  (add1 (bytes-length bstr)))
+(define char*-size (compiler-sizeof '*))
+(define (bytes-length/nul+ptr bstr)
+  (+ (bytes-length/nul bstr) char*-size))
+
+(define fish? (let ([shell (environment-variables-ref environment #"SHELL")])
+                (and shell (regexp-match? #px#"/fish$" shell))))
+(define (escape-shell-word bstr)
+  (cond
+    [(regexp-match? #px#"^[-/[:word:]]+$" bstr)
+     bstr]
+    [(regexp-match? #px#"^[-/[:graph:][:blank:]]+$" bstr)
+     (bytes-append #"'"
+                   (if fish?
+                       (~> (regexp-replace* #px#"\\'" bstr #"\\\\'")
+                           (regexp-replace* #px#"'" _ #"\\'"))
+                       (regexp-replace* #px#"'" bstr #"'\\''"))
+                   #"'")]
+    [else
+     (define (escape-byte bstr)
+       (match bstr
+         [(regexp #px#"[[:graph:]]")
+          (bytes-append #"\\" bstr)]
+         [#"\a" #"\\a"]
+         [#"\b" #"\\b"]
+         [#"\f" #"\\f"]
+         [#"\n" #"\\n"]
+         [#"\r" #"\\r"]
+         [#"\t" #"\\t"]
+         [#"\v" #"\\v"]
+         [#" " #"\\ "]
+         [(app bytes->list (list b))
+          (bytes-append #"\\x" (string->bytes/locale (~r b #:base 16
+                                                         #:min-width 2
+                                                         #:pad-string "0")))]))
+     (define escaped-bstr (regexp-replace* #px#"[^-/[:word:]]" bstr escape-byte))
+     (if fish?
+         escaped-bstr
+         (bytes-append #"$'" escaped-bstr #"'"))]))
+
+(define (getconf var-name)
+  (string-trim
+   (with-output-to-string
+     (λ ()
+       (define exit-code (system*/exit-code "/usr/bin/getconf" var-name))
+       (unless (zero? exit-code)
+         (panic! "‘getconf’ exited with non-zero exit code"
+                 #:fields `(["exit code" . ,exit-code])))))))
+
+(define ARG-MAX (string->number (getconf "ARG_MAX")))
+
+(define delimiter "\n")
+
+(define max-size (- ARG-MAX 2048))
+(define max-num #f)
+(define exact-num? #t)
+
+(define insert-mode #f)
+(define prefix-strs '())
+(define suffix-strs '())
+
+(define verbose? #f)
+(define dry-run? #f)
+
+(define-values [utility args]
+  (command-line
+   #:usage-help
+   "Executes <utility> with the given <arg>s, plus arguments provided"
+   "via standard in, much like ‘xargs’ (but with extra functionality)."
+   #:help-labels
+   ""
+   "DELIMITERS"
+   #:once-any
+   [("-d" "--delimiter") str ["Use <str> as the delimiter."]
+                         (set! delimiter str)]
+   [("--nul") "Use the NUL character as the delimiter."
+              (set! delimiter "\x0")]
+   #:help-labels
+   ""
+   " Note: If neither the ‘-d’/‘--delimiter’ nor ‘--nul’ options are"
+   "  specified, the default delimiter is the newline character (‘\\n’).\n"
+   "ARGUMENT LIST SIZE"
+   #:once-each
+   [("-s" "--size") n
+    [""
+     " Limit the size of the environment and argument list to be no more"
+     "  than <n> bytes long (including NUL terminators), which may not"
+     "  be longer than ‘ARG_MAX’. The default value is ‘ARG_MAX - 2048’.\n"]
+    (define num (string->number n))
+    (unless (exact-positive-integer? num)
+      (panic! "value for ‘-s’/‘--size’ option must be a positive integer"
+              #:fields `(["<n>" . ,(or num n)])))
+    (when (> num ARG-MAX)
+      (panic! "value given for ‘-s’/‘--size’ option is larger than ‘ARG_MAX’"
+              #:fields `(["<n>" . ,num]
+                         ["ARG_MAX" . ,ARG-MAX])))
+                    (set! max-size num)]
+   [("-n" "--number") n
+    [""
+     " Read <n> tokens from the input per execution of <utility>. If fewer"
+     "  than <n> arguments remain in the input or if <n> arguments would"
+     "  exceed the length specified by ‘-s’/‘--size’, an error is raised,"
+     "  unless the ‘--lax’ option is provided. (Note that some executions"
+     "  may be performed successfully before an error is reached.)\n"]
+    (define num (string->number n))
+    (unless (exact-positive-integer? num)
+      (panic! "value for ‘-n’/‘--number’ option must be a positive integer"
+              #:fields `(["<n>" . ,(or num n)])))
+    (set! max-num num)]
+   [("--lax")
+    [""
+     " Allows the number of arguments passed to <utility> to be less than"
+     "  the <n> specified by the ‘-n’/‘--number’ option if fewer than <n>"
+     "  tokens remain in the input or if passing <n> arguments would cause"
+     "  the argument list to be longer than the limit specified by the"
+     "  ‘-s’/‘--size’ option."
+     " "
+     "  If ‘-n’/‘--number’ is not provided, this option has no effect." " "]
+    (set! exact-num? #f)]
+   #:help-labels "REPLACEMENT"
+   #:once-any
+   [("-@" "--at") str
+    [""
+     " Splice arguments into the <arg> list wherever <str> appears,"
+     "  instead of appending them to the end. The <str> argument must be"
+     "  provided exactly once." " "]
+    (set! insert-mode (cons 'at (string->bytes/locale str)))]
+   [("-E" "--each") str
+    [""
+     " For each occurrence of <str> in <arg>s, consume a single token"
+     "  from the input and use it instead of <str>. Effectively implies"
+     "  ‘-n <n>’, where <n> is the number of times <str> appears in <arg>s." " "]
+    (set! insert-mode (cons 'each (string->bytes/locale str)))]
+   [("-R" "--replace") str
+    [""
+     " Like the ‘-E’/‘--each’ option, except that <str> will be"
+     "  substituted within each <arg> even if <arg> contains other"
+     "  content."
+     " "
+     "  This option is incomaptible with ‘--lax’.\n"]
+    (set! insert-mode (cons 'replace (string->bytes/locale str)))]
+   #:multi
+   [("+p" "++prefix") str
+    [""
+     " For each argument inserted into the <arg> list, also insert a"
+     "  separate argument with the contents of <str> immediately"
+     "  before. This argument may be specified multiple times, in"
+     "  which case the extra arguments are added in the order they are"
+     "  specified.\n"
+     "  The <str>s are not subject to any further expansion, splitting,"
+     "  or replacement.\n"
+     "  When combined with the ‘-R’/‘--replace’ option, <str> is"
+     "  inserted only once before each <arg> for which replacement"
+     "  took place, even if substitution is performed multiple times"
+     "  for a single <arg>.\n"]
+    (set! prefix-strs (cons (string->bytes/locale str) prefix-strs))]
+   [("+s" "++suffix") str
+    [""
+     " Like the ‘+p’/‘++prefix’ option, but the additional arguments"
+     "  are inserted after rather than before the arguments taken from"
+     "  standard in.\n"]
+    (set! suffix-strs (cons (string->bytes/locale str) suffix-strs))]
+   #:help-labels "MISC"
+   #:once-each
+   [("-v" "--verbose")
+    [""
+     " Print each command line to standard error before executing it.\n"]
+    (set! verbose? #t)]
+   [("--dry-run")
+    [""
+     " Don’t actually execute any commands, just build them. Implies"
+     "  ‘--verbose’.\n"]
+    (set! verbose? #t)
+    (set! dry-run? #t)]
+   #:args (utility . arg) (values utility (map string->bytes/locale arg))))
+
+(define prefix-args (reverse prefix-strs))
+(define suffix-args (reverse suffix-strs))
+(define prefix-size (apply + (map bytes-length/nul+ptr prefix-args)))
+(define suffix-size (apply + (map bytes-length/nul+ptr suffix-args)))
+(define prefix+suffix-size (+ prefix-size suffix-size))
+
+(define utility-path (find-executable-path utility))
+(unless utility-path
+  (panic! "could not find <utility> on PATH" #:fields `(["<utility>" . ,utility])))
+(define utility-simple-path (simple-form-path utility-path))
+(define utility-path-size (bytes-length/nul (path->bytes utility-simple-path)))
+
+(define environment-size
+  (add1 (for/sum ([name (in-list (environment-variables-names environment))])
+          ; Actual layout of `environ` in memory is a `char**` of strings of the shape `name=value`,
+          ; so each entry takes the space of `name`, the space of `value`, plus two bytes for the `=`
+          ; and the NUL, plus space for the pointer. (Plus a single extra byte at the end of the whole
+          ; thing for the NULL terminator.)
+          (+ (bytes-length/nul name)
+             (bytes-length/nul+ptr (environment-variables-ref environment name))))))
+
+;; ---------------------------------------------------------------------------------------------------
+
+(define (make-build-argument-list/at pre-args post-args)
+  (define start-length (+ 1 utility-path-size environment-size
+                          (apply + (map bytes-length/nul+ptr pre-args))
+                          (apply + (map bytes-length/nul+ptr post-args))))
+  (define (finish arg-chunks input-args)
+    (values (append pre-args (append* (reverse arg-chunks)) post-args)
+            input-args))
+  (λ (input-args)
+    (let loop ([input-args input-args]
+               [size start-length]
+               [arg-chunks '()]
+               [num-chunks 0])
+      (cond
+        [(or (stream-empty? input-args)
+             (and max-num (>= num-chunks max-num)))
+         (finish arg-chunks input-args)]
+        [else
+         (define new-arg (stream-first input-args))
+         (define new-size (+ size prefix+suffix-size (bytes-length/nul+ptr new-arg)))
+         (if (and (not (zero? num-chunks))
+                  (> new-size max-size))
+             (finish arg-chunks input-args)
+             (loop (stream-rest input-args)
+                   new-size
+                   (cons (append prefix-args (cons new-arg suffix-args)) arg-chunks)
+                   (add1 num-chunks)))]))))
+
+(define ((make-build-argument-list/each arg-chunks post-args) tokens)
+  (error 'make-build-argument-list/each "not implemented yet"))
+
+(define ((make-build-argument-list/replace arg-chunks post-args) tokens)
+  (error 'make-build-argument-list/replace "not implemented yet"))
+
+(define build-argument-list
+  (match insert-mode
+    [#f
+     (make-build-argument-list/at args '())]
+    [(cons 'at str)
+     (match (indexes-of args str bytes=?)
+       [(list idx)
+        (match-define-values [pre-args (cons _ post-args)] (split-at args idx))
+        (make-build-argument-list/at pre-args post-args)]
+       ['() (panic! "<str> specified by ‘-@’/‘--at’ option did not appear in <arg>s"
+                    #:fields `(["<str>" . ,str]))]
+       [_ (panic! "<str> specified by ‘-@’/‘--at’ option appears multiple times in <arg>s"
+                  #:fields `(["<str>" . ,str]))])]
+    [(cons 'each str)
+     (when max-num
+       (panic! "‘-n’/‘--number’ and ‘-E’/‘--each’ options are mutually-exclusive"))
+     (panic! "‘-E’/‘--each’ is not implemented yet")]
+    [(cons 'replace str)
+     (when max-num
+       (panic! "‘-n’/‘--number’ and ‘-R’/‘--replace’ options are mutually-exclusive"))
+     (when (not exact-num?)
+       (panic! "‘--lax’ does not make sense with ‘-R’/‘--replace’"))
+     (panic! "‘-R’/‘--replace’ is not implemented yet")]))
+
+;; ---------------------------------------------------------------------------------------------------
+
+(define quoted-delimiter (regexp-quote (string->bytes/locale delimiter)))
+(define token-regexp (byte-regexp (bytes-append #"(.*?)(?:" quoted-delimiter #"|$)")))
+(define (read-token [in (current-input-port)])
+  (if (eof-object? (peek-char in))
+      eof
+      (second (regexp-match token-regexp in))))
+
+(let loop ([input-args (for/stream ([token (in-port read-token)]) token)])
+  (unless (stream-empty? input-args)
+    (define-values [arg-list remaining-input-args] (build-argument-list input-args))
+    (when verbose?
+      (write-bytes (escape-shell-word (string->bytes/locale utility)))
+      (for ([arg (in-list arg-list)])
+        (write-bytes #" ")
+        (write-bytes (escape-shell-word arg)))
+      (newline))
+    (unless dry-run?
+      (unless (apply system* utility-simple-path arg-list)
+        (exit 123)))
+    (loop remaining-input-args)))
