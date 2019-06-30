@@ -1,0 +1,53 @@
+#!/usr/bin/env racket
+#lang reader (submod "support/lang/script.rkt" reader)
+
+(require pkg/lib
+         racket/cmdline
+         racket/function
+         racket/hash
+         racket/path
+         setup/dirs)
+
+(define collects? #f)
+(define pregexp? #f)
+(define terminator #\newline)
+
+(define pkg-match?
+  (command-line
+   #:once-each
+   [("-c" "--collects")
+    "Include collection directories in the output"
+    (set! collects? #t)]
+   ["--px"
+    "Treat <pkg>s as `#px` regular expressions"
+    (set! pregexp? #t)]
+   ["--nul"
+    "Terminate paths with a NUL character instead of a newline"
+    (set! terminator #\nul)]
+   #:args pkg
+   (cond
+     [(null? pkg)
+      (const #t)]
+     [pregexp?
+      (define pxs (map pregexp pkg))
+      (λ (name) (for/or ([px (in-list pxs)])
+                  (regexp-match? px name)))]
+     [else
+      (λ (name) (for/or ([pkg (in-list pkg)])
+                  (string=? name pkg)))])))
+
+(define (write-pkg-path p)
+  (write-bytes (path->bytes (simple-form-path p)))
+  (write-char terminator))
+
+(when collects?
+  (for ([collects-dir (in-list (get-collects-search-dirs))]
+        #:when (directory-exists? collects-dir))
+    (write-pkg-path collects-dir)))
+
+(for ([pkg-dir (in-list (get-pkgs-search-dirs))])
+  (parameterize ([current-pkg-scope (simple-form-path pkg-dir)])
+    (define cache (make-hash))
+    (with-pkg-lock/read-only
+      (for ([pkg-name (in-list (installed-pkg-names #:scope (current-pkg-scope)))])
+        (write-pkg-path (pkg-directory pkg-name #:cache cache))))))
