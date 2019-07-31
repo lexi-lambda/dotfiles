@@ -30,6 +30,8 @@ default-extensions:
 - DeriveLift
 - DeriveTraversable
 - DerivingStrategies
+- DerivingStrategies
+- DerivingVia
 - EmptyCase
 - ExistentialQuantification
 - FlexibleContexts
@@ -53,6 +55,7 @@ default-extensions:
 - TypeFamilies
 - TypeFamilyDependencies
 - TypeOperators
+- ViewPatterns
 
 dependencies:
 - base >= 4.10 && < 5
