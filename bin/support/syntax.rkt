@@ -5,8 +5,7 @@
          racket/list
          racket/match
          racket/string
-         syntax/srcloc
-         "contract.rkt")
+         syntax/srcloc)
 
 (provide (contract-out
           [~id (->* [] [#:context (or/c syntax? #f)

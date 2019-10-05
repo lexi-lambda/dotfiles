@@ -1,0 +1,159 @@
+#!/usr/bin/env racket
+#lang reader (submod "support/lang/script.rkt" reader)
+
+(require racket/cmdline
+         racket/file
+         racket/format
+         racket/match
+         racket/path
+         racket/port
+         racket/string
+         racket/system
+         "support/resource.rkt")
+
+(define diff-executable (find-executable-path "diff"))
+
+(define color:reset #"\e(B\e[m")
+(define color:bold #"\e[1m")
+(define color:red #"\e[31m")
+(define color:green #"\e[32m")
+(define color:blue #"\e[34m")
+
+(define (go #:pattern pattern
+            #:replacement replacement-pattern
+            #:input in
+            #:output out
+            #:file-path file-path
+            #:only-matching-lines? only-matching-lines?
+            #:color? color?
+            #:prefix-lines? prefix-lines?)
+  (for/fold ([any-patterns-matched? #f])
+            ([line (in-lines in)]
+             [line-number (in-naturals 1)])
+    (let loop ([last-position 0])
+      (match (regexp-match-positions pattern line last-position)
+        [(cons (cons start-position end-position) capture-groups)
+         (when (zero? (- end-position start-position))
+           (panic! "pattern matched empty string"))
+         (when (and (zero? last-position) prefix-lines?)
+           (when color?
+             (write-bytes color:blue out))
+           (when file-path
+             (fprintf out "~a:" (path->string (simplify-path file-path))))
+           (fprintf out "~a:" line-number)
+           (when color?
+             (write-bytes color:reset out)))
+         (write-string line out last-position start-position)
+         (when color?
+           (write-bytes color:bold out)
+           (write-bytes color:red out))
+         (when (or (not replacement-pattern) color?)
+           (write-string line out start-position end-position))
+         (when replacement-pattern
+           (define matched-string (substring line start-position end-position))
+           (define replacement-string
+             (for/fold ([replacement-string
+                         (string-replace replacement-pattern "&" matched-string)])
+                       ([capture-group (in-list capture-groups)]
+                        [group-index (in-naturals 1)])
+               (string-replace replacement-string
+                               (format "\\~a" group-index)
+                               (match capture-group
+                                 [(cons capture-start capture-end)
+                                  (substring line capture-start capture-end)]
+                                 [#f ""]))))
+           (when color?
+             (write-bytes color:green))
+           (write-string replacement-string out))
+         (when color?
+           (write-bytes color:reset out))
+         (loop end-position)]
+        [#f
+         (unless (and only-matching-lines? (zero? last-position))
+           (write-string line out last-position)
+           (newline out))
+         (or any-patterns-matched? (not (zero? last-position)))]))))
+
+(define (diff #:input-left in-left
+              #:input-right in-right
+              #:output out
+              #:file-path file-path
+              #:color? color?
+              #:context-lines [context 3])
+  (unless diff-executable
+    (panic! #:name 'diff "cannot find executable"))
+  (with-resources ([() (make-custodian-resource)]
+                   [fifo-left (make-fifo-resource #:filename (string->path "old"))]
+                   [fifo-right (make-fifo-resource #:filename (string->path "new"))])
+    (thread (λ () (call-with-output-file fifo-left #:mode 'text #:exists 'update
+                    (λ (out-left) (copy-port in-left out-left)))))
+    (thread (λ () (call-with-output-file fifo-right #:mode 'text #:exists 'update
+                    (λ (out-right) (copy-port in-right out-right)))))
+    (when color?
+      (write-bytes color:bold out)
+      (write-bytes color:blue out))
+    (displayln (path->string (simplify-path file-path)) out)
+    (when color?
+      (write-bytes color:reset out)
+      (flush-output out))
+    (parameterize ([current-output-port out])
+      (system* diff-executable fifo-left fifo-right))))
+
+(module+ main
+  (define out (current-output-port))
+  (define terminal-out? (terminal-port? out))
+
+  (define replacement-pattern #f)
+  (define in-place? #f)
+  (define dry-run? #f)
+
+  (define-values [pattern-string file-paths]
+    (command-line
+     #:once-each
+     [("-r" "--replace") replacement
+                         "Replace the pattern using the given pattern."
+                         (set! replacement-pattern replacement)]
+     [("--in-place")
+      "Destructively transform files in-place."
+      (set! in-place? #t)]
+     [("--dry-run")
+      "Don’t actually transform files in-place, just print diffs."
+      (set! dry-run? #t)]
+     #:args (pattern . file-path) (values pattern file-path)))
+
+  (when (and in-place? (not replacement-pattern))
+    (panic! "cannout specify ‘--in-place’ without a replacement pattern"))
+
+  (define pattern (pregexp pattern-string))
+  (define terminal-target? (and terminal-out? (not in-place?)))
+  (define print-filename? (> (length file-paths) 1))
+
+  (for ([file-path (in-list file-paths)])
+    (define (go/out out)
+      (call-with-input-file file-path #:mode 'text
+        (λ (in)
+          (go #:pattern pattern
+              #:replacement replacement-pattern
+              #:input in
+              #:output out
+              #:file-path (and print-filename? file-path)
+              #:only-matching-lines? (or terminal-target? (not replacement-pattern))
+              #:color? terminal-target?
+              #:prefix-lines? terminal-target?))))
+    (cond
+      [in-place?
+       (define buffer-out (open-output-string))
+       (when (go/out buffer-out)
+         (define new-contents (get-output-string buffer-out))
+         (cond
+           [dry-run?
+            (call-with-input-file file-path #:mode 'text
+              (λ (in)
+                (diff #:input-left in
+                      #:input-right (open-input-string new-contents)
+                      #:output out
+                      #:file-path file-path
+                      #:color? terminal-out?)))]
+           [else
+            (display-to-file new-contents file-path #:mode 'text #:exists 'replace)]))]
+      [else (go/out out)])))
