@@ -1,0 +1,34 @@
+#!/usr/bin/env fish
+
+set cmd_argv $argv
+
+function get_option -a arity
+  set -l option_name $cmd_argv[1]
+  set -e cmd_argv[1]
+
+  if test (count $cmd_argv) -lt $arity
+    echo "nested-fish: expected $arity argument(s) for $option_name, given" (count $cmd_argv) >&2
+    exit 1
+  end
+
+  printf '%s\n' $cmd_argv[1..$arity]
+  set -e cmd_argv[1..$arity]
+end
+
+set label '*'
+
+while test (count $cmd_argv) -gt 0
+  switch $cmd_argv[1]
+    case --
+      set -e cmd_argv[1]
+      break
+    case -l --label
+      set label (get_option 1)
+    case '-*'
+      echo "nested-fish: unknown option $cmd_argv[1]" >&2
+      exit 1
+  end
+end
+
+set --path -xa NESTED_FISH_LABELS "$label"
+exec fish $cmd_argv

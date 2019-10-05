@@ -1,5 +1,5 @@
 function with-racket -d 'Parameterize the Racket version for a command'
-  argparse -n with-racket -x l,e l/list e/eval -- $argv
+  argparse -n with-racket -x l,e,i l/list e/eval i/interactive -- $argv
   or return 1
 
   if set -q _flag_list
@@ -17,16 +17,21 @@ function with-racket -d 'Parameterize the Racket version for a command'
     return
   end
 
-  if [ (count $argv) -lt 2 ]
-    log-msg -n with-racket 'expected at least 2 arguments'
+  set -l min_args 2
+  if set -q _flag_interactive
+    set min_args 1
+  end
+  if [ (count $argv) -lt $min_args ]
+    log-msg -n with-racket "expected at least $min_args argument(s)"
     return 1
   end
 
   set -lx RACKET_HOME "$RACKET_HOME"
   set -lx PATH $PATH
 
+  set -l new_version "$argv[1]"
+
   begin
-    set -l new_version "$argv[1]"
     set -l old_racket_bin "$RACKET_HOME"/bin
 
     set -l versions_left $RACKET_VERSIONS
@@ -59,6 +64,8 @@ function with-racket -d 'Parameterize the Racket version for a command'
 
   if set -q _flag_eval
     eval $argv[2..-1]
+  else if set -q _flag_interactive
+    nested-fish -l "racket-$new_version" -- $argv[2..-1]
   else
     $argv[2..-1]
   end

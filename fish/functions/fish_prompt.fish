@@ -1,7 +1,16 @@
+set --path -a NESTED_FISH_LABELS
+
 function fish_prompt
   set -l command_status $status
   set -l question_mark_in_circle '?'\u20dd
   set_color red; echo -n '# '
+
+  # print nesting
+  if test (count $NESTED_FISH_LABELS) -gt 0
+    echo -ns '[' (set_color yellow) \
+      (string join (set_color red)/(set_color yellow) $NESTED_FISH_LABELS) \
+      (set_color red) '] '
+  end
 
   # print current location
   if [ "$PWD" = "$HOME" ]
