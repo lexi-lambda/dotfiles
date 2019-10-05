@@ -1,0 +1,262 @@
+#!/usr/bin/env racket
+#lang reader (submod "support/lang/script.rkt" reader)
+
+(require json
+         net/base64
+         net/head
+         net/qp
+         net/smtp
+         openssl
+         racket/format
+         racket/list
+         racket/match
+         racket/port
+         racket/random
+         racket/string
+         racket/system
+         xml
+         "support/error.rkt"
+         "support/resource.rkt")
+
+(define-logger send-pandoc-email)
+
+;; ---------------------------------------------------------------------------------------------------
+
+(define (open-input-empty) (open-input-bytes #""))
+
+(define mime-type:plain-text "text/plain;charset=utf-8")
+(define mime-type:html "text/html;charset=utf-8")
+(define (mime-type:alternative boundary)
+  (data-lines->data (list "multipart/alternative;charset=utf-8;"
+                          (~a "boundary=\"" boundary "\""))))
+
+(define (make-data-uri str #:content-type [content-type mime-type:plain-text])
+  (~a "data:" content-type ";base64,"
+      (bytes->string/utf-8 (base64-encode (string->bytes/utf-8 str) #""))))
+
+(define (uuid-v4-string)
+  (define bs (crypto-random-bytes 16))
+  (define (piece start end)
+    (number->string (integer-bytes->integer bs #f (system-big-endian?) start end) 16))
+  (string-append (piece 0 4)
+                 "-" (piece 4 6)
+                 "-" (piece 6 8)
+                 "-" (piece 8 10)
+                 "-" (piece 10 12) (piece 12 16)))
+
+(define (fresh-boundary-label)
+  (string-append "boundary-" (uuid-v4-string)))
+
+(define (split-on-crlf str)
+  (string-split str "\r\n" #:trim? #f))
+
+(define (headers->string headers)
+  (foldr (λ (header acc) (insert-field (car header) (cdr header) acc)) empty-header headers))
+
+(define (make-message-body content-type content)
+  (append (split-on-crlf (headers->string
+                          (list (cons "Content-Type" content-type)
+                                (cons "Content-Transfer-Encoding" "quoted-printable"))))
+          (split-on-crlf (qp-encode (string->bytes/utf-8 content)))))
+
+(define (make-name+address name address)
+  (string-append name " <" address ">"))
+
+;; ---------------------------------------------------------------------------------------------------
+;; pandoc
+
+(define pandoc-path (find-executable-path "pandoc"))
+
+(define meta-json-template (make-data-uri "$meta-json$"))
+(define html-email-template
+  (make-data-uri
+   (xexpr->string
+    `(html (head (meta ([http-equiv "Content-Type"] [content ,mime-type:plain-text]))
+                 (style ,(~a "span.smallcaps{font-variant:small-caps;}"
+                             "span.underline{text-decoration:underline;}"
+                             "$if(highlighting-css)$$highlighting-css$$endif$"
+                             "p,pre,a.sourceLine{line-height:140%;line-height:1.4;}"
+                             ; use specific selector to be sure to override pandoc’s selector
+                             "code,pre.sourceCode code{white-space:pre-wrap;}"
+                             "pre,div.sourceCode{margin-left:2em;}"
+                             "div.sourceCode>pre.sourceCode{margin:0;}")))
+           (body "$body$")))))
+
+(define (run-pandoc #:args args
+                    #:input [in (open-input-empty)]
+                    #:read-output read-out)
+  (unless pandoc-path
+    (panic! #:name 'pandoc "cannot find executable"))
+  (define in-port (if (input-port? in)
+                      in
+                      (open-input-empty)))
+  (define all-args (if (input-port? in)
+                       args
+                       (append args (list "--" in))))
+  (with-resources ([() (make-custodian-resource)])
+    (define err (open-output-string))
+    (log-send-pandoc-email-debug "~s ~a" pandoc-path (string-join (map ~s all-args) " "))
+    (match-define (list out #f _ #f interact)
+      (apply process*/ports #f in-port err pandoc-path all-args))
+    (begin0
+      (read-out out)
+      (close-input-port out)
+      (interact 'wait)
+      (let ()
+        (define pandoc-exit-code (interact 'exit-code))
+        (define pandoc-err-output (get-output-string err))
+        (unless (and (zero? pandoc-exit-code)
+                     (zero? (string-length pandoc-err-output)))
+          (panic! (string-append "pandoc exited with " (if (not (zero? pandoc-exit-code))
+                                                           "non-zero exit code"
+                                                           "unclean error output"))
+                  #:fields (append (if (zero? pandoc-exit-code) '()
+                                       (list (cons "exit code" pandoc-exit-code)))
+                                   (if (zero? (string-length pandoc-err-output)) '()
+                                       (list (cons "error output" (unquoted-printing-string
+                                                                   pandoc-err-output)))))))))))
+
+(define (pandoc #:input in
+                #:from [from-format #f]
+                #:to to-format
+                #:highlight-style [highlight-style "pygments"])
+  (run-pandoc #:args (append (if from-format
+                                 (list "--from" from-format)
+                                 (list))
+                             (match to-format
+                               ['plain
+                                (list "--to" "plain")]
+                               ['html
+                                (list "--to" "html"
+                                      "--template" html-email-template
+                                      ; make pandoc not complain if no title is specified for HTML
+                                      ; output (since our template doesn’t use it, anyway)
+                                      "--variable" "pagetitle:none")]
+                               ['meta-json
+                                (list "--to" "plain"
+                                      "--template" meta-json-template)])
+                             (if highlight-style
+                                 (list "--highlight-style" highlight-style)
+                                 (list "--no-highlight")))
+              #:input in
+              #:read-output (match to-format
+                              [(or 'plain 'html)
+                               port->string]
+                              ['meta-json
+                               read-json])))
+
+(define (metadata-ref-string data #:failure [failure-result #f] . path)
+  (define escape-tag (make-continuation-prompt-tag))
+  (define (fail/escape)
+    (when failure-result
+      (abort-current-continuation escape-tag failure-result)))
+  (call-with-continuation-prompt
+   (λ ()
+     (define (make-path-field path)
+       (cons "path" (unquoted-printing-string (string-join (map symbol->string path) "."))))
+     (define (panic!/unexpected-value path expected found)
+       (fail/escape)
+       (panic! "unexpected metadata value for key"
+               #:fields (list (make-path-field path)
+                              (cons "expected" (unquoted-printing-string expected))
+                              (cons "found" found))))
+     (define val (let loop ([data data]
+                            [path-to-go path]
+                            [path-so-far '()])
+                   (cond
+                     [(empty? path-to-go)
+                      data]
+                     [else
+                      (unless (hash? data)
+                        (panic!/unexpected-value (reverse path-so-far) "an object" data))
+                      (define key (first path-to-go))
+                      (loop (hash-ref data key
+                                      (λ ()
+                                        (fail/escape)
+                                        (panic! "missing value for required metadata key"
+                                                #:fields (list (make-path-field
+                                                                (reverse (cons key path-so-far)))))))
+                            (rest path-to-go)
+                            (cons key path-so-far))])))
+     (unless (string? val)
+       (panic!/unexpected-value path "a string" val))
+     val)
+   escape-tag
+   (λ (v) (if (procedure? v) (v) v))))
+
+;; ---------------------------------------------------------------------------------------------------
+
+(module+ main
+  (require racket/cmdline)
+
+  (define from-format #f)
+  (define dry-run? #f)
+
+  (define input-file
+    (command-line
+     #:once-each
+     [("--format") format
+      "Specify input format"
+      (set! from-format format)]
+     [("-n" "--dry-run")
+      "Don’t actually send the email, just print what would be sent"
+      (set! dry-run? #t)]
+     #:args ([input-file #f]) input-file))
+
+  (define input-data (and (not input-file) (port->string (current-input-port))))
+  (close-input-port (current-input-port))
+  (define (get-input) (or input-file (open-input-string input-data)))
+
+  ;; SMTP + sender configuration
+  (define smtp-host "smtp.gmail.com")
+  (define smtp-port 587)
+  (define smtp-user "lexi.lambda")
+  (define smtp-password "<REDACTED>")
+
+  (define sender-address "lexi.lambda@gmail.com")
+  (define sender-name "Alexis King")
+  (define sender-name+address (make-name+address sender-name sender-address))
+
+  ;; Read input metadata
+  (define input-metadata (pandoc #:input (get-input) #:from from-format #:to 'meta-json))
+  (define recipient-address (metadata-ref-string input-metadata 'email 'to 'address))
+  (define recipient-name (metadata-ref-string input-metadata 'email 'to 'name))
+  (define recipient-name+address (make-name+address recipient-name recipient-address))
+  (define subject (metadata-ref-string input-metadata 'email 'subject))
+
+  ;; Read content
+  (define plain-content (pandoc #:input (get-input) #:from from-format #:to 'plain))
+  (define html-content (pandoc #:input (get-input) #:from from-format #:to 'html))
+
+  ;; Build and send message
+  (define alts-label (fresh-boundary-label))
+
+  (define headers-str
+    (headers->string (list (cons "From" sender-name+address)
+                           (cons "To" (assemble-address-field (list recipient-name+address)))
+                           (cons "Subject" subject)
+                           (cons "MIME-Version" "1.0")
+                           (cons "Content-Type" (mime-type:alternative alts-label)))))
+  (define content-strs (append (list (string-append "--" alts-label))
+                               (make-message-body mime-type:plain-text plain-content)
+                               (list (string-append "--" alts-label))
+                               (make-message-body mime-type:html html-content)
+                               (list (string-append "--" alts-label "--"))))
+
+  (cond
+    [dry-run?
+     (printf "SMTP ~a@~a:~a\n" smtp-user smtp-host smtp-port)
+     (printf "FROM ~a\n" sender-address)
+     (printf "  TO ~a\n\n" recipient-address)
+     (for-each displayln (split-on-crlf headers-str))
+     (for-each displayln content-strs)]
+    [else
+     (smtp-send-message smtp-host
+                        #:port-no smtp-port
+                        #:auth-user smtp-user
+                        #:auth-passwd smtp-password
+                        #:tls-encode ports->ssl-ports
+                        sender-address
+                        (list recipient-address)
+                        headers-str
+                        content-strs)]))
