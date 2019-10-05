@@ -1,5 +1,5 @@
 #!/usr/bin/env racket
-#lang racket/base
+#lang reader (submod "support/lang/script.rkt" reader)
 
 (require gregor
          gregor/period
@@ -78,6 +78,8 @@
   (define mode 'absolute)
 
   (command-line
+   #:usage-help
+   "Prints each line of stdin to stdout, prefixed with a timestamp."
    #:once-any
    ["--absolute"
     "Print absolute timestamps using the system clock (default)"
@@ -96,7 +98,8 @@
            racket/port
            racket/stxparam
            rackunit
-           syntax/parse/define)
+           syntax/parse/define
+           "support/resource.rkt")
 
   (define (read-all-bytes-avail in
                                 [initial-buffer-size 256]
@@ -120,27 +123,16 @@
            [else
             (loop buffer buffer-position buffer-size)])])))
 
-  (define (call-with-resource #:construct constructor #:destruct destructor proc)
-    (call-with-continuation-barrier
-     (λ ()
-       (define vals (call-with-values (λ () (constructor)) list))
-       (dynamic-wind
-        void
-        (λ () (apply proc vals))
-        (λ () (apply destructor vals))))))
-
-  (define (call-with-pipe proc)
-    (call-with-resource
-     #:construct make-pipe
-     #:destruct (λ (in out) (close-input-port in) (close-output-port out))
-     proc))
-
-  (define (call-with-custodian proc)
-    (call-with-resource
-     #:construct make-custodian
-     #:destruct custodian-shutdown-all
-     (λ (cust) (parameterize ([current-custodian cust])
-                 (proc)))))
+  (define clock-resource
+    (make-resource
+     #:name 'clock
+     #:wrapper (λ (proc)
+                 (define clock (datetime 0 1 1 12 10 30))
+                 (define (advance-clock! period)
+                   (set! clock (+period clock period)))
+                 (parameterize ([current-timezone "Etc/UTC"]
+                                [current-clock (λ () (->posix clock))])
+                   (proc advance-clock!)))))
 
   (define (call-with-clock proc)
     (define clock (datetime 0 1 1 12 10 30))
@@ -155,42 +147,41 @@
   (define-rename-transformer-parameter advance-clock! (make-rename-transformer #'test-case-keyword))
   (define-rename-transformer-parameter write+read! (make-rename-transformer #'test-case-keyword))
 
-  (define (call-with-timestamp-lines #:mode mode proc)
-    (call-with-custodian
-     (λ ()
-       (call-with-pipe
-        (λ (stdin-in stdin-out)
-          (call-with-pipe
-           (λ (stdout-in stdout-out)
-             (define (write+read!-proc in-bytes expected-response-length)
-               (write-bytes in-bytes stdin-out)
-               (sync (read-bytes-evt expected-response-length stdout-in)
-                     (wrap-evt (alarm-evt (+ (current-inexact-milliseconds) 100))
-                               (λ (evt)
-                                 (define avail
-                                   (read-all-bytes-avail stdout-in
-                                                         #:on-eof (λ (avail) `#s(eof ,avail))))
-                                 (if (bytes? avail)
-                                     `#s(timeout ,avail)
-                                     avail)))))
-             (call-with-clock
-              (λ (advance-clock!-proc)
-                (thread (λ () (timestamp-lines #:mode mode #:input stdin-in #:output stdout-out)))
-                (proc advance-clock!-proc write+read!-proc)
-                (close-output-port stdin-out)
-                (port->bytes stdout-in))))))))))
+  (define (make-timestamp-lines-resource #:mode mode)
+    (make-resource
+     #:name 'timestamp-lines
+     #:wrapper
+     (λ (proc)
+       (with-resources ([() (make-custodian-resource)]
+                        [(stdin-in stdin-out) (make-pipe-resource #:name 'stdin)]
+                        [(stdout-in stdout-out) (make-pipe-resource #:name 'stdout)])
+         (define (write+read!-proc in-bytes expected-response-length)
+           (write-bytes in-bytes stdin-out)
+           (sync (read-bytes-evt expected-response-length stdout-in)
+                 (wrap-evt (alarm-evt (+ (current-inexact-milliseconds) 100))
+                           (λ (evt)
+                             (define avail
+                               (read-all-bytes-avail stdout-in
+                                                     #:on-eof (λ (avail) `#s(eof ,avail))))
+                             (if (bytes? avail)
+                                 `#s(timeout ,avail)
+                                 avail)))))
+         (with-resources ([advance-clock!-proc clock-resource])
+           (thread (λ () (timestamp-lines #:mode mode #:input stdin-in #:output stdout-out)))
+           (proc advance-clock!-proc write+read!-proc)
+           (close-output-port stdin-out)
+           (port->bytes stdout-in))))))
 
   (define-syntax-parser timestamp-lines-test-case
     [(_ #:mode mode:expr body ...+)
      #`(test-begin
         (define leftovers
-          (call-with-timestamp-lines
-           #:mode mode
-           (λ (advance-clock!-proc write+read!-proc)
-             (syntax-parameterize
-                 ([advance-clock! (make-rename-transformer #'advance-clock!-proc)]
-                  [write+read! (make-rename-transformer #'write+read!-proc)])
-               body ...))))
+          (with-resources ([(advance-clock!-proc write+read!-proc)
+                            (make-timestamp-lines-resource #:mode mode)])
+            (syntax-parameterize
+                ([advance-clock! (make-rename-transformer #'advance-clock!-proc)]
+                 [write+read! (make-rename-transformer #'write+read!-proc)])
+              body ...)))
         #,(syntax/loc this-syntax
             (check-equal? leftovers #"" "Data left at end of port")))])
 

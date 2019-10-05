@@ -1,5 +1,5 @@
 #!/usr/bin/env racket
-#lang racket/base
+#lang reader (submod "support/lang/script/exec.rkt" reader)
 
 (require racket/cmdline
          racket/function
@@ -39,13 +39,9 @@
    (values command arg)))
 
 (when (empty? paths)
-  (displayln "error: No paths to watch; specify a path using -p or --path." (current-error-port))
-  (exit 1))
-
+  (panic! "No paths to watch; specify a path using -p or --path."))
 (when (and ignore-vcs? (not git-available?))
-  (displayln "error: --ignore-vcs was specified, but could not find ‘git’ executable in PATH."
-             (current-error-port))
-  (exit 1))
+  (panic! "--ignore-vcs was specified, but could not find ‘git’ executable in PATH."))
 
 (define (dotfile? path)
   (match-let-values ([(_ name _) (split-path path)])
