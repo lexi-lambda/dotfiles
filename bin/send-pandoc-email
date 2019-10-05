@@ -1,12 +1,14 @@
 #!/usr/bin/env racket
 #lang reader (submod "support/lang/script.rkt" reader)
 
-(require json
+(require (for-syntax racket/base)
+         json
          net/base64
          net/head
          net/qp
          net/smtp
          openssl
+         racket/contract
          racket/format
          racket/list
          racket/match
@@ -14,9 +16,11 @@
          racket/random
          racket/string
          racket/system
+         syntax/parse/define
          xml
          "support/error.rkt"
-         "support/resource.rkt")
+         "support/resource.rkt"
+         "support/tree-parse.rkt")
 
 (define-logger send-pandoc-email)
 
@@ -59,8 +63,10 @@
                                 (cons "Content-Transfer-Encoding" "quoted-printable"))))
           (split-on-crlf (qp-encode (string->bytes/utf-8 content)))))
 
-(define (make-name+address name address)
-  (string-append name " <" address ">"))
+(struct email (name address) #:transparent
+  #:guard (struct-guard/c string? string?))
+(define (email-name+address self)
+  (~a (email-name self) " <" (email-address self) ">"))
 
 ;; ---------------------------------------------------------------------------------------------------
 ;; pandoc
@@ -145,44 +151,57 @@
                               ['meta-json
                                read-json])))
 
-(define (metadata-ref-string data #:failure [failure-result #f] . path)
-  (define escape-tag (make-continuation-prompt-tag))
-  (define (fail/escape)
-    (when failure-result
-      (abort-current-continuation escape-tag failure-result)))
-  (call-with-continuation-prompt
-   (λ ()
-     (define (make-path-field path)
-       (cons "path" (unquoted-printing-string (string-join (map symbol->string path) "."))))
-     (define (panic!/unexpected-value path expected found)
-       (fail/escape)
-       (panic! "unexpected metadata value for key"
-               #:fields (list (make-path-field path)
-                              (cons "expected" (unquoted-printing-string expected))
-                              (cons "found" found))))
-     (define val (let loop ([data data]
-                            [path-to-go path]
-                            [path-so-far '()])
-                   (cond
-                     [(empty? path-to-go)
-                      data]
-                     [else
-                      (unless (hash? data)
-                        (panic!/unexpected-value (reverse path-so-far) "an object" data))
-                      (define key (first path-to-go))
-                      (loop (hash-ref data key
-                                      (λ ()
-                                        (fail/escape)
-                                        (panic! "missing value for required metadata key"
-                                                #:fields (list (make-path-field
-                                                                (reverse (cons key path-so-far)))))))
-                            (rest path-to-go)
-                            (cons key path-so-far))])))
-     (unless (string? val)
-       (panic!/unexpected-value path "a string" val))
-     val)
-   escape-tag
-   (λ (v) (if (procedure? v) (v) v))))
+;; ---------------------------------------------------------------------------------------------------
+
+(define/contract (json-record/p
+                  ps
+                  #:absent [absent (json-null)]
+                  #:name [name "an object"]
+                  #:value-name [value-name (λ (k) (~a "the value for key " (~v (symbol->string k))))])
+  (->* [(hash/c symbol? parser?)]
+       [#:absent any/c
+        #:name (or/c string? #f)
+        #:value-name (or/c (-> symbol? string?) #f)]
+       (parser/c jsexpr? hash?))
+  (describe/p
+   #:name name
+   (and/last/p
+    (satisfy/p hash?)
+    (map/p (apply and/list/p
+                  (for/list ([(k p) (in-immutable-hash ps)])
+                    (map/p #:in (λ (h) (hash-ref h k absent))
+                           (describe/p p #:name (and value-name (value-name k)))
+                           #:out (λ (v) (cons k v)))))
+           #:out make-immutable-hasheq))))
+
+(define (nullable/p p #:default [def-v #f])
+  (commit/p (or/p (and/last/p (equal?/p (json-null)) (succeed/p def-v))
+                  (and/last/p cut/p p))))
+
+(define any-string/p (describe/p #:name "a string" (satisfy/p string?)))
+
+(define (regexp->string rx)
+  (~a "/" (string-replace (object-name rx) "/" "\\/") "/"))
+(define (regexp/p rx #:name [name (~a "a string matching " (regexp->string rx))])
+  (describe/p #:name name (satisfy/p (λ (v) (and (string? v) (regexp-match? rx v))))))
+
+(define email/p (describe/p
+                 #:name "an email"
+                 (map/p (json-record/p (hasheq 'name any-string/p
+                                               'address any-string/p))
+                        #:out (λ (h) (email (hash-ref h 'name) (hash-ref h 'address))))))
+
+(define message-id/p (regexp/p #:name "a message id" #px"^<[^<>]+@[^<>]+>$"))
+
+(define metadata/p
+  (map/p (json-record/p
+          (hasheq 'email (json-record/p
+                          (hasheq 'to email/p
+                                  'subject any-string/p
+                                  'in-reply-to (nullable/p message-id/p)
+                                  'extra-references (nullable/p (listof/p message-id/p)
+                                                                #:default '())))))
+         #:out (λ (h) (hash-ref h 'email))))
 
 ;; ---------------------------------------------------------------------------------------------------
 
@@ -211,18 +230,17 @@
   (define smtp-host "smtp.gmail.com")
   (define smtp-port 587)
   (define smtp-user "lexi.lambda")
-  (define smtp-password "<REDACTED>")
+  (define smtp-password "REDACTED")
 
-  (define sender-address "lexi.lambda@gmail.com")
-  (define sender-name "Alexis King")
-  (define sender-name+address (make-name+address sender-name sender-address))
+  (define sender (email "Alexis King" "lexi.lambda@gmail.com"))
 
   ;; Read input metadata
   (define input-metadata (pandoc #:input (get-input) #:from from-format #:to 'meta-json))
-  (define recipient-address (metadata-ref-string input-metadata 'email 'to 'address))
-  (define recipient-name (metadata-ref-string input-metadata 'email 'to 'name))
-  (define recipient-name+address (make-name+address recipient-name recipient-address))
-  (define subject (metadata-ref-string input-metadata 'email 'subject))
+  (match-define (hash-table ['to recipient]
+                            ['subject subject]
+                            ['in-reply-to in-reply-to]
+                            ['extra-references extra-references])
+    (parse metadata/p input-metadata))
 
   ;; Read content
   (define plain-content (pandoc #:input (get-input) #:from from-format #:to 'plain))
@@ -232,11 +250,16 @@
   (define alts-label (fresh-boundary-label))
 
   (define headers-str
-    (headers->string (list (cons "From" sender-name+address)
-                           (cons "To" (assemble-address-field (list recipient-name+address)))
-                           (cons "Subject" subject)
-                           (cons "MIME-Version" "1.0")
-                           (cons "Content-Type" (mime-type:alternative alts-label)))))
+    (headers->string
+     (append (list (cons "From" (email-name+address sender))
+                   (cons "To" (assemble-address-field (list (email-name+address recipient))))
+                   (cons "Subject" subject)
+                   (cons "MIME-Version" "1.0")
+                   (cons "Content-Type" (mime-type:alternative alts-label)))
+             (if in-reply-to
+                 (list (cons "In-Reply-To" in-reply-to)
+                       (cons "References" (data-lines->data (cons in-reply-to extra-references))))
+                 '()))))
   (define content-strs (append (list (string-append "--" alts-label))
                                (make-message-body mime-type:plain-text plain-content)
                                (list (string-append "--" alts-label))
@@ -246,8 +269,8 @@
   (cond
     [dry-run?
      (printf "SMTP ~a@~a:~a\n" smtp-user smtp-host smtp-port)
-     (printf "FROM ~a\n" sender-address)
-     (printf "  TO ~a\n\n" recipient-address)
+     (printf "FROM ~a\n" (email-address sender))
+     (printf "  TO ~a\n\n" (email-address recipient))
      (for-each displayln (split-on-crlf headers-str))
      (for-each displayln content-strs)]
     [else
@@ -256,7 +279,7 @@
                         #:auth-user smtp-user
                         #:auth-passwd smtp-password
                         #:tls-encode ports->ssl-ports
-                        sender-address
-                        (list recipient-address)
+                        (email-address sender)
+                        (list (email-address recipient))
                         headers-str
                         content-strs)]))
