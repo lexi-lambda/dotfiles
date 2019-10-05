@@ -1,0 +1,105 @@
+#!/usr/bin/env racket
+#lang reader (submod "support/lang/script/exec.rkt" reader)
+(require-os! '(unix macosx))
+
+(require ffi/unsafe
+         ffi/unsafe/define
+         ffi/unsafe/port
+         racket/format
+         racket/match
+         racket/path
+         racket/port
+         racket/system
+         "support/resource.rkt")
+
+(define-ffi-definer define-util (ffi-lib "libutil"))
+
+(define (check-operation-status who status)
+  (or (zero? status)
+      (raise-arguments-error who "operation failed" "errno" (saved-errno))))
+
+(define _file-descriptor _int)
+
+(define-util openpty
+  (_fun #:save-errno 'posix
+        [server-fd : (_ptr o _file-descriptor)]
+        [client-fd : (_ptr o _file-descriptor)]
+        [_pointer = #f] ; char* name
+        [_pointer = #f] ; struct termios* termp
+        [_pointer = #f] ; struct winsize* winp
+        -> [status : _int]
+        -> (and (check-operation-status 'forkpty status)
+                (let ()
+                  (define-values [server-in server-out]
+                    (unsafe-file-descriptor->port server-fd 'pty:server '(read write)))
+                  (define-values [client-in client-out]
+                    (unsafe-file-descriptor->port client-fd 'pty:client '(read write)))
+                  (values server-in server-out client-in client-out)))))
+
+(define pty-resource
+  (make-resource
+   #:name 'pty
+   #:constructor openpty
+   #:destructor
+   (λ (server-in server-out client-in client-out)
+     (close-input-port server-in)
+     (close-output-port server-out)
+     (close-input-port client-in)
+     (close-output-port client-out))))
+
+(define (exec-in-pty command args
+                     #:input [in (current-input-port)]
+                     #:output [out (current-output-port)]
+                     #:error [err (current-error-port)]
+                     #:single? [single? #f])
+  (define (spawn-copier in out)
+    (thread (λ ()
+              (copy-port in out)
+              (close-output-port out))))
+
+  (define (do-exec-process in out err)
+    (match-define (list #f #f _ #f control)
+      (apply process*/ports out in err (find-executable-path command) args))
+    (control 'wait)
+    (control 'exit-code))
+
+  (parameterize ([current-subprocess-custodian-mode 'kill])
+    (with-resources ([() (make-custodian-resource)]
+                     [(server-1-in server-1-out client-1-in client-1-out) pty-resource])
+      (spawn-copier in server-1-out)
+      (spawn-copier server-1-in out)
+      (if single?
+          (do-exec-process client-1-in client-1-out client-1-out)
+          (with-resources ([(server-2-in server-2-out client-2-in client-2-out) pty-resource])
+            (close-output-port server-2-out)
+            (close-input-port client-2-in)
+            (spawn-copier server-2-in err)
+            (do-exec-process client-1-in client-1-out client-2-out))))))
+
+(module+ main
+  (require racket/cmdline)
+
+  (define single? #f)
+
+  (define-values [command args]
+    (command-line
+     #:usage-help
+     "Runs a command inside a fresh pseudo-terminal (pty). Mostly useful for"
+     "tricking programs into running interactively or disabling output buffering."
+     #:once-any
+     ["--single"
+      "Only allocate a single pty instead of allocating two."
+      (set! single? #t)]
+     ["--double"
+      "Allocate two ptys, one for stdout and one for stderr (the default)."
+      (set! single? #f)]
+     #:help-labels
+     "    Note: Only allocating a single pty means both stdout and stderr of"
+     "     the inner process will be directed to stdout of the outer process,"
+     "     making them impossible to distinguish. However, some programs detect"
+     "     when connected to multiple ptys and treat that as a redirect,"
+     "     disabling interactive mode and enabling output buffering. The --single"
+     "     option can be used to defeat those checks."
+     #:args (command . arg) (values command arg)))
+
+  (exit (exec-in-pty command args #:single? single?)))
