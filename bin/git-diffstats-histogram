@@ -1,0 +1,133 @@
+#!/usr/bin/env racket
+#lang reader (submod "support/lang/script.rkt" reader)
+
+(require racket/cmdline
+         racket/format
+         racket/function
+         racket/list
+         racket/match
+         racket/system
+         threading
+         "support/resource.rkt")
+
+(define git-executable (find-executable-path "git"))
+
+(define color:reset #"\e(B\e[m")
+(define color:bold #"\e[1m")
+(define color:red #"\e[31m")
+(define color:green #"\e[32m")
+(define color:blue #"\e[34m")
+
+(struct commit (sha title added deleted) #:transparent)
+
+(define (go refspec
+            #:width [width 150]
+            #:cumulative? [cumulative? #f]
+            #:color? [color? #f])
+  (define raw-commits
+    (with-resources ([() (make-custodian-resource)])
+      (match-define (list in _ _ _ _)
+        (process*/ports #f (open-input-bytes #"") (current-error-port) git-executable
+                        "log" "--format=* %h %s" "--numstat" "--reverse" refspec))
+
+      (port-count-lines! in)
+
+      (define (skip-blank-lines)
+        (void (regexp-match #px"^\n*" in)))
+
+      (define (parse-failure)
+        (match-define-values [line col _] (port-next-location in))
+        (panic! "cannot parse git-diff output"
+                #:fields `(["output" . ,(read-line in)]
+                           ["line" . ,line]
+                           ["column" . ,col])))
+
+      (define (read-commits)
+        (skip-blank-lines)
+        (if (eof-object? (peek-char in))
+            '()
+            (match (regexp-try-match #px"^\\* ([a-z0-9]+) (.*?)\n" in)
+              [(list _ sha title)
+               (define-values [added deleted] (read-numstats))
+               (cons (commit (bytes->string/utf-8 sha)
+                             (bytes->string/utf-8 title)
+                             added deleted)
+                     (read-commits))]
+              [#f (parse-failure)])))
+
+      (define (read-numstats)
+        (skip-blank-lines)
+        (let loop ([added 0] [deleted 0])
+          (match (regexp-try-match #px"^([0-9]+)\t([0-9]+)\t.*?\n" in)
+            [(list _
+                   (app (λ~> bytes->string/utf-8 string->number) (? exact-integer? file-added))
+                   (app (λ~> bytes->string/utf-8 string->number) (? exact-integer? file-deleted)))
+             (loop (+ added file-added) (+ deleted file-deleted))]
+            [#f (values added deleted)])))
+
+      (read-commits)))
+
+  (define commits
+    (if cumulative?
+        ((for/foldr ([continue (λ (added-so-far deleted-so-far) '())]
+                     #:delay-with thunk)
+                    ([c (in-list raw-commits)])
+           (λ (added-so-far deleted-so-far)
+             (define added-so-far* (+ added-so-far (commit-added c)))
+             (define deleted-so-far* (+ deleted-so-far (commit-deleted c)))
+             (cons (struct-copy commit c
+                                [added added-so-far*]
+                                [deleted deleted-so-far*])
+                   ((continue) added-so-far* deleted-so-far*))))
+         0 0)
+        raw-commits))
+
+  (define sha-width (argmax values (map (λ~> commit-sha string-length) commits)))
+  (define title-width (argmax values (map (λ~> commit-title string-length) commits)))
+  (define added-width (argmax values (map (λ~> commit-added ~a string-length) commits)))
+  (define deleted-width (argmax values (map (λ~> commit-deleted ~a string-length) commits)))
+  ; deadbeef My cool commit +100/-20 +++++|-
+  (define reserved-width (+ sha-width title-width added-width deleted-width 7))
+
+  (define added-max (argmax values (map commit-added commits)))
+  (define deleted-max (argmax values (map commit-deleted commits)))
+  (define changed-max (+ added-max deleted-max))
+
+  (define histogram-width (- width reserved-width))
+  (define added-histogram-width (floor (* (/ added-max changed-max) histogram-width)))
+  (define deleted-histogram-width (floor (* (/ deleted-max changed-max) histogram-width)))
+
+  (define (color c) (if color? c ""))
+  (for ([c (in-list commits)])
+    (displayln
+     (~a (color color:blue)  (~a (commit-sha c) #:min-width sha-width #:align 'right)
+         (color color:reset) " " (~a (commit-title c) #:min-width title-width) " "
+         (color color:green) (~a "+" (commit-added c) #:min-width (add1 added-width) #:align 'right)
+         (color color:reset) "/"
+         (color color:red)   "-" (~a (commit-deleted c) #:min-width deleted-width)
+         (color color:reset) " "
+         (color color:green) (~a (make-string (floor (* (/ (commit-added c) added-max)
+                                                        added-histogram-width))
+                                              #\+)
+                                 #:min-width added-histogram-width #:align 'right)
+         (color color:reset) "|"
+         (color color:red)   (make-string (floor (* (/ (commit-deleted c) deleted-max)
+                                                    deleted-histogram-width))
+                                          #\-)
+         (color color:reset)))))
+
+(module+ main
+  (define out (current-output-port))
+  (define terminal-out? (terminal-port? out))
+
+  (define cumulative? #f)
+
+  (define refspec
+    (command-line
+     #:once-each
+     [("--cumulative")
+      "Calculate running totals instead of per-commit stats."
+      (set! cumulative? #t)]
+     #:args (refspec) refspec))
+
+  (go refspec #:cumulative? cumulative? #:color? terminal-out?))
