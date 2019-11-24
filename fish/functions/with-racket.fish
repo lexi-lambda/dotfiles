@@ -65,7 +65,7 @@ function with-racket -d 'Parameterize the Racket version for a command'
   if set -q _flag_eval
     eval $argv[2..-1]
   else if set -q _flag_interactive
-    nested-fish -l "racket-$new_version" -- $argv[2..-1]
+    nested-fish -l "racket $new_version" -- $argv[2..-1]
   else
     $argv[2..-1]
   end
