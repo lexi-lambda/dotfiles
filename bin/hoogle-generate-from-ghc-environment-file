@@ -1,0 +1,53 @@
+#!/usr/bin/env racket
+#lang reader (submod "support/lang/script.rkt" reader)
+
+(require racket/cmdline
+         racket/match
+         racket/system)
+
+(define-values [env-file-path hoogle-db-path]
+  (command-line #:args (environment-file hoogle-db) (values environment-file hoogle-db)))
+
+(define-values [pkg-db-args pkg-ids]
+  (call-with-input-file* env-file-path #:mode 'text
+    (λ (env-file-in)
+      (for/fold ([pkg-db-args '()] [pkg-ids '()])
+                ([line (in-lines env-file-in)])
+        (match line
+          [(or "" "clear-package-db" (regexp #px"^--"))
+           (values pkg-db-args pkg-ids)]
+          ["global-package-db"
+           (values (cons "--global" pkg-db-args) pkg-ids)]
+          [(regexp #px"^package-db (.+)$" (list _ db))
+           (values (append (list "--package-db" db) pkg-db-args) pkg-ids)]
+          [(regexp #px"^package-id (.+)$" (list _ id))
+           (values pkg-db-args (cons id pkg-ids))])))))
+
+(match-define (list ghc-pkg-in #f _ #f _)
+  (apply process*/ports #f (open-input-string "") (current-error-port)
+         (find-executable-path "ghc-pkg") "dump" pkg-db-args))
+
+(define doc-dirs
+  (let loop ([doc-dirs '()])
+    (match (regexp-match #px"(?m:^id:\\s*(\\S+))" ghc-pkg-in)
+      [#f doc-dirs]
+      [(list _ (app bytes->string/utf-8 pkg-id))
+       (if (member pkg-id pkg-ids)
+           (match (regexp-match #px"(?m:^haddock-html:\\s*(\\S.*)$|^---$)" ghc-pkg-in)
+             [(or #f (list #"---" #f))
+              (fprintf (current-error-port) "warning: no haddock-html entry for package ‘~a’\n" pkg-id)
+              (loop doc-dirs)]
+             [(list _ doc-dir)
+              (cond
+                [(directory-exists? (bytes->path doc-dir))
+                 (loop (cons doc-dir doc-dirs))]
+                [else
+                 (fprintf (current-error-port) "warning: haddock-html directory for package ‘~a’ does not exist\n" pkg-id)
+                 (loop doc-dirs)])])
+           (loop doc-dirs))])))
+
+(close-input-port ghc-pkg-in)
+
+(void (apply system* (find-executable-path "hoogle") "generate" "--database" hoogle-db-path
+             (for*/list ([doc-dir (in-list doc-dirs)])
+               (bytes-append #"--local=" doc-dir))))
