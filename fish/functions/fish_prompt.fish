@@ -29,12 +29,12 @@ function fish_prompt
   echo -n ' '
 
   # show some pretty git information if we're in a git repo
-  set -l git_branch (git branch 2>/dev/null | sed -n '/\* /s///p')
-  if [ -n "$git_branch" ]
+  set -l is_git_worktree (git rev-parse --is-inside-work-tree 2>/dev/null)
+  if test "$is_git_worktree" = true
     if git rev-parse '@{u}' >/dev/null 2>&1
       # if an upstream is set, check how far ahead/behind the branch is
-      set -l git_commits_ahead (git rev-list '@{u}..HEAD' | wc -l | awk \{'print $1'\})
-      set -l git_commits_behind (git rev-list 'HEAD..@{u}' | wc -l | awk \{'print $1'\})
+      set -l git_commits_ahead (git rev-list '@{u}..HEAD' | wc -l | awk '{print $1}')
+      set -l git_commits_behind (git rev-list 'HEAD..@{u}' | wc -l | awk '{print $1}')
       if [ \( "$git_commits_ahead" -eq 0 \) -a \( "$git_commits_behind" -eq 0 \) ]
         set_color blue; echo -n '⦿'
       else
@@ -50,15 +50,18 @@ function fish_prompt
       set_color brred; echo -n "$question_mark_in_circle"
     end
 
-    set_color blue; echo -n ' ['
-    # color the branch name differently if the working tree is dirty
-    if [ (count (git status --porcelain)) -gt 0 ]
-      set_color brred
-    else
-      set_color yellow
+    set -l git_branch (git branch 2>/dev/null | sed -n '/\* /s///p')
+    if test -n "$git_branch"
+      set_color blue; echo -n ' ['
+      # color the branch name differently if the working tree is dirty
+      if [ (count (git status --porcelain)) -gt 0 ]
+        set_color brred
+      else
+        set_color yellow
+      end
+      echo -n "$git_branch"
+      set_color blue; echo -n '] '
     end
-    echo -n "$git_branch"
-    set_color blue; echo -n '] '
   end
 
   if [ "$command_status" -eq 0 ]
