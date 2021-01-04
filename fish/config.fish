@@ -16,6 +16,9 @@ if status is-login
 
   set -gx PLTCOMPILEDROOTS 'compiled/@(version):'
 
+  if type -qP vim
+    set -gx EDITOR vim
+  end
   if type -qP vimpager
     set -gx PAGER "vimpager -c 'source ~/.vimrc'"
   end
