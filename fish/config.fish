@@ -6,8 +6,8 @@ if status is-login
     end
   end
 
-  for extra_path in ~/.local/bin ~/.cabal/bin
-    if [ -d "$extra_path" ]
+  for extra_path in ~/.{local,cabal,ghcup}/bin
+    if test -d "$extra_path"
       set -gxp PATH "$extra_path"
     end
   end
