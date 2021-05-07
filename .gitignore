@@ -1,3 +1,4 @@
+bin/fish-nix-locale
 fish/conf.d/local/
 fish/fish_variables
 
