@@ -8,7 +8,8 @@
 .ruby-version
 .rbenv-vars
 
-# Haskell Stack
+# Haskell
+.ghc.environment.*
 .stack-work
 
 # Annoying npm error logs
