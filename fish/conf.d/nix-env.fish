@@ -33,10 +33,12 @@ else
 end
 
 if test -e $nix_profile_path
-  # Source the nix setup script
-  # We're going to run the regular Nix profile under bash and then print out a few variables
-  for line in (env -u BASH_ENV bash -c '. "$0"; for name in PATH "${!NIX_@}"; do printf "%s=%s\0" "$name" "${!name}"; done' $nix_profile_path | string split0)
-    set -xg (string split -m 1 = $line)
+  if status is-login
+    # Source the nix setup script
+    # We're going to run the regular Nix profile under bash and then print out a few variables
+    for line in (env -u BASH_ENV bash -c '. "$0"; for name in PATH "${!NIX_@}"; do printf "%s=%s\0" "$name" "${!name}"; done' $nix_profile_path | string split0)
+      set -xg (string split -m 1 = $line)
+    end
   end
 
   # Insert Nix's fish share directories into fish's special variables.

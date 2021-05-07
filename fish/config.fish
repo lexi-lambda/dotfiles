@@ -12,7 +12,7 @@ if status is-login
     end
   end
 
-  set -gxp PATH "$DOTFILES_HOME"/bin "$RACKET_HOME"/bin
+  set -gxp PATH $DOTFILES_HOME/bin $RACKET_HOME/bin
 
   set -gx PLTCOMPILEDROOTS 'compiled/@(version):'
 
@@ -27,16 +27,18 @@ if status is-login
   set -gx LSCOLORS 'gxfxcxdxbxegedabaggxgx'
 end
 
-set -g fish_color_command cyan
-set -g fish_color_end red
-set -g fish_color_error red --bold
-set -g fish_color_escape yellow
-set -g fish_color_operator blue
-set -g fish_color_param normal
-set -g fish_color_quote green
-set -g fish_color_redirection red
+if status is-interactive
+  set -g fish_color_command cyan
+  set -g fish_color_end red
+  set -g fish_color_error red --bold
+  set -g fish_color_escape yellow
+  set -g fish_color_operator blue
+  set -g fish_color_param normal
+  set -g fish_color_quote green
+  set -g fish_color_redirection red
 
-abbr -ag co git checkout
-abbr -ag cob git checkout -b
-abbr -ag gh hub browse
-abbr -ag st git status -uall
+  abbr -ag co git checkout
+  abbr -ag cob git checkout -b
+  abbr -ag gh hub browse
+  abbr -ag st git status -uall
+end
