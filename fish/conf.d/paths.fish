@@ -13,7 +13,7 @@ if status is-login
 
   set -gx DOTFILES_HOME $CODE_HOME/dotfiles
 
-  set -gx RACKET_HOME $CODE_HOME/racket/racket/racket
+  set -gx RACKET_HOME $CODE_HOME/racket/racket/master/racket
   set -gx RACKET_VERSIONS HEAD $RACKET_HOME
 
   for racket_dist_dir in '/Applications/Racket v'*
