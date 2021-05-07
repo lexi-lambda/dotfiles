@@ -1,9 +1,12 @@
 CC      := cc
 CC_OPTS := -std=c11 -Wall -Werror -pedantic -O3
 
-all: bin/fish-nix-locale
+build: bin/fish-nix-locale
 
 bin/fish-nix-locale: bin/fish-nix-locale.c
 	$(CC) $(CC_OPTS) bin/fish-nix-locale.c -o bin/fish-nix-locale
 
-.PHONY: all
+install-xkb:
+	ln -sf xkb/us_typography /usr/share/X11/xkb/symbols/us_typography
+
+.PHONY: build install-xkb

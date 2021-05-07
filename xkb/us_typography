@@ -4,8 +4,12 @@ xkb_symbols "typography" {
   name[Group1]= "English (US, Typography)";
 
   key <AE11> { [ minus, underscore, endash, emdash ] };
+
+  key <AD03> { [ e, E, dead_acute ] };
+  key <AD07> { [ u, U, dead_diaeresis ] };
   key <AD11> { [ bracketleft, braceleft, leftdoublequotemark, rightdoublequotemark ] };
   key <AD12> { [ bracketright, braceright, leftsinglequotemark, rightsinglequotemark ] };
+
   key <AC10> { [ semicolon, colon, ellipsis ] };
 
   include "level3(ralt_switch)"
