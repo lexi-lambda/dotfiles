@@ -1,0 +1,8 @@
+advanced-open-file
+file-icons
+file-types
+language-fish-shell
+language-haskell
+sort-lines
+vim-mode-plus
+vim-mode-plus-keymaps-for-surround
