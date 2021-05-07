@@ -1,0 +1,49 @@
+'atom-text-editor.vim-mode-plus':
+  'ctrl-c': 'core:copy'
+  'ctrl-[': 'editor:outdent-selected-rows'
+
+'atom-text-editor.vim-mode-plus.normal-mode':
+  'ctrl-t': 'unset!'
+
+'atom-text-editor.vim-mode-plus:not(.normal-mode)':
+  'ctrl-[': 'editor:outdent-selected-rows'
+
+'atom-text-editor.vim-mode-plus.insert-mode':
+  'ctrl-w': 'core:close'
+
+'atom-text-editor.vim-mode-plus:not(.insert-mode)':
+  'ctrl-f': 'find-and-replace:show'
+
+  'ctrl-w ctrl-h': 'unset!'
+  'ctrl-w h': 'unset!'
+  'ctrl-w left': 'unset!'
+  'ctrl-w ctrl-l': 'unset!'
+  'ctrl-w l': 'unset!'
+  'ctrl-w right': 'unset!'
+  'ctrl-w ctrl-k': 'unset!'
+  'ctrl-w k': 'unset!'
+  'ctrl-w up': 'unset!'
+  'ctrl-w ctrl-j': 'unset!'
+  'ctrl-w j': 'unset!'
+  'ctrl-w down': 'unset!'
+  'ctrl-w ctrl-w': 'unset!'
+  'ctrl-w w': 'unset!'
+  'ctrl-w ctrl-p': 'unset!'
+  'ctrl-w p': 'unset!'
+  'ctrl-w ctrl-x': 'unset!'
+  'ctrl-w x': 'unset!'
+  'ctrl-w K': 'unset!'
+  'ctrl-w J': 'unset!'
+  'ctrl-w H': 'unset!'
+  'ctrl-w L': 'unset!'
+  'ctrl-w ctrl-v': 'unset!'
+  'ctrl-w v': 'unset!'
+  'ctrl-w ctrl-s': 'unset!'
+  'ctrl-w s': 'unset!'
+  'ctrl-w z': 'unset!'
+  'ctrl-w Z': 'unset!'
+  'ctrl-w =': 'unset!'
+  'ctrl-w ctrl-c': 'unset!'
+  'ctrl-w c': 'unset!'
+  'ctrl-w ctrl-q': 'unset!'
+  'ctrl-w q': 'unset!'

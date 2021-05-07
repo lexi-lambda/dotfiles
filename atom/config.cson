@@ -1,0 +1,21 @@
+"*":
+  core:
+    allowPendingPaneItems: false
+    closeEmptyWindows: false
+    openEmptyEditorOnStart: false
+    themes: [
+      "one-dark-ui"
+      "base16-tomorrow-dark-theme"
+    ]
+  editor:
+    fontFamily: "Fira Code"
+    scrollPastEnd: true
+    softWrapAtPreferredLineLength: true
+  "file-types":
+    "cabal.project*": "source.cabal"
+  "vim-mode-plus":
+    groupChangesWhenLeavingInsertMode: false
+    useClipboardAsDefaultRegister: false
+    wrapLeftRightMotion: true
+  welcome:
+    showOnStartup: false
