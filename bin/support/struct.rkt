@@ -68,7 +68,7 @@
              (define self-ref (fourth info))
              (λ (self) (self-ref self v))]
             [else
-             v]))))
+             (λ (self) v)]))))
      supers
      can-impersonate?))
   (values prop:name name? (procedure-rename (λ (self) ((name-ref self) self)) name)))
