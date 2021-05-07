@@ -1,3 +1,5 @@
+SHELL   := /bin/bash
+
 JOBS    := 1
 
 CC      := cc
@@ -15,10 +17,11 @@ build-racket-bin:
 bin/fish-nix-locale: bin/fish-nix-locale.c
 	$(CC) $(CC_OPTS) bin/fish-nix-locale.c -o bin/fish-nix-locale
 
-install-atom-packages:
+install-atom-config:
 	apm install --packages-file atom/packages.txt
+	ln -s "$$(pwd)"/atom/{config,keymap}.cson ~/.atom/
 
 install-xkb:
 	ln -sf "$$(pwd)/xkb/us_typography" /usr/share/X11/xkb/symbols/us_typography
 
-.PHONY: build build-racket-bin install-atom-packages install-xkb
+.PHONY: build build-racket-bin install-atom-config install-xkb
