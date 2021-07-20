@@ -64,10 +64,12 @@
               (newline out))
             last-line]))
        (cond
-         [(zero? (bytes-length last-line))]
+         [(zero? (bytes-length last-line))
+          #t]
          [else
           (write-timestamp)
-          (write-bytes last-line out)])]))
+          (write-bytes last-line out)
+          #f])]))
 
   (when close?
     (close-output-port out)))
@@ -215,6 +217,21 @@
   (timestamp-lines-test-case
    #:mode 'relative
    (check-write+read! #"\n\n\n" #"[+00:00:00] \n[+00:00:00] \n[+00:00:00] \n"))
+
+  (timestamp-lines-test-case
+   #:mode 'relative
+   (check-write+read! #"hello " #"[+00:00:00] hello ")
+   (check-write+read! #"world" #"world")
+   (check-write+read! #"!\n" #"!\n")
+   (check-write+read! #"hello" #"[+00:00:00] hello")
+   (check-write+read! #"goodbye\ncruel world\n" #"goodbye\n[+00:00:00] cruel world\n"))
+
+  (timestamp-lines-test-case
+   #:mode 'relative
+   (define long-message (make-bytes 300 65))
+   (check-write+read! (bytes-append long-message #"\n" long-message)
+                      (bytes-append #"[+00:00:00] " long-message #"\n"
+                                    #"[+00:00:00] " long-message)))
 
   (timestamp-lines-test-case
    #:mode 'both
