@@ -3,7 +3,14 @@ set --path -a NESTED_FISH_LABELS
 function fish_prompt
   set -l command_status $status
   set -l question_mark_in_circle '?'\u20dd
-  set_color red; echo -n '# '
+
+  # print hostname if client is remote
+  set_color red
+  if set -q SSH_TTY
+    echo -n '@'(hostname)' '
+  else
+    echo -n '# '
+  end
 
   # print nesting
   if test (count $NESTED_FISH_LABELS) -gt 0
