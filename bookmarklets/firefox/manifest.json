@@ -1,0 +1,29 @@
+{
+  "manifest_version": 2,
+  "name": "dotfiles",
+  "version": "0.0.1",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "{6f4a8f74-1cdb-40ad-8abc-2e9d90998f33}"
+    }
+  },
+
+  "permissions": ["activeTab"],
+
+  "commands": {
+    "remove-current-fragment": {
+      "suggested_key": {
+        "default": "Ctrl+Alt+K"
+      }
+    },
+    "scroll-to-current-fragment": {
+      "suggested_key": {
+        "default": "Ctrl+Alt+L"
+      }
+    }
+  },
+
+  "background": {
+    "scripts": ["background-script.js"]
+  }
+}
