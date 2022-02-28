@@ -1,6 +1,7 @@
 #lang racket/base
 
 (require (for-syntax racket/base)
+         net/http-client
          racket/contract
          racket/file
          racket/match
@@ -32,7 +33,8 @@
           [make-fifo-resource (->* [] [#:filename path-element?] resource?)]
           [make-temporary-file-resource (->* [] [#:filename-template string?
                                                  #:directory? any/c]
-                                             resource?)]))
+                                             resource?)]
+          [make-http-conn-resource (-> resource?)]))
 
 ;; ---------------------------------------------------------------------------------------------------
 ;; core
@@ -136,3 +138,9 @@
      (values fifo-dir fifo-file))
    #:destructor (λ (fifo-dir fifo-file) (delete-directory/files fifo-dir #:must-exist? #t))
    #:wrapper (λ (thunk fifo-dir fifo-file) (thunk fifo-file))))
+
+(define (make-http-conn-resource)
+  (make-resource
+   #:name 'http-conn
+   #:constructor http-conn
+   #:destructor http-conn-close!))

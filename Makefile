@@ -13,7 +13,7 @@ build-racket-bin:
 	raco pkg install --skip-installed --auto gregor threading
 	cd bin && raco make -vj $(JOBS) \
 		batch-args exec-in-pty git-diffstats-histogram \
-		hoogle-generate-from-ghc-environment-file racket-regexp \
+		hoogle-generate-from-ghc-environment-file racket-pkgn-cli racket-regexp \
 		raco-pkg-show-local-paths timestamp-lines watch-exec
 
 bin/fish-nix-locale: bin/fish-nix-locale.c

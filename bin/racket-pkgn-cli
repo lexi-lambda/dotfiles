@@ -1,0 +1,379 @@
+#!/usr/bin/env racket
+#lang reader (submod "support/lang/script.rkt" reader)
+
+(require net/http-client
+         net/uri-codec
+         net/url
+         racket/format
+         racket/list
+         racket/match
+         racket/string
+         version/utils
+         xml
+         "support/resource.rkt")
+
+;; -----------------------------------------------------------------------------
+
+(define-logger pkgn-cli)
+
+(define PKGN-HOST "pkgd.racket-lang.org")
+(define (build-pkgn-path . args)
+  (string-append "/pkgn/" (string-join args "/")))
+
+(define (get-pkgn-relative-path what url-str)
+  (define parsed-url (string->url url-str))
+
+  (unless (or (not (url-host parsed-url))
+              (string=? (url-host parsed-url) PKGN-HOST))
+    (panic! (~a "unexpected non-internal " what)
+            #:fields (list (cons "url" url-str))))
+
+  (url->string
+   (struct-copy url parsed-url [scheme #f] [user #f] [host #f] [port #f])))
+
+(define current-pkgn-session-id (make-parameter #f))
+
+;; A list of known Racket releases, starting with 5.92, since that’s the first
+;; release that supports version exceptions.
+(define known-racket-versions
+  (let ()
+    (define (series major max-minor)
+      (for/list ([minor (in-range (add1 max-minor))])
+        (~a major "." minor)))
+
+    (sort (append '("5.92" "5.93")
+                  (series 6 12) '("6.0.1" "6.1.1" "6.2.1" "6.10.1")
+                  (series 7 9)
+                  (series 8 4))
+          version<?)))
+
+(define (check-known-racket-version str)
+  (unless (valid-version? str)
+    (panic! "invalid version string" #:fields (list (cons "string" str))))
+  (unless (member str known-racket-versions)
+    (panic! "unknown Racket version"
+            "(perhaps `known-racket-versions` needs to be updated?)"
+            #:fields (list (cons "version" str)))))
+
+;; string? -> (listof known-racket-version?)
+(define (parse-version-spec str)
+  (match str
+    [(regexp #px"^([0-9.]+)-([0-9.]+)$" (list _ min max))
+     (check-known-racket-version min)
+     (check-known-racket-version max)
+     (takef (dropf known-racket-versions
+                   (λ (v) (version<? v min)))
+            (λ (v) (version<=? v max)))]
+    [_
+     (check-known-racket-version str)
+     (list str)]))
+
+;; -----------------------------------------------------------------------------
+
+;; Like `close-input-port`, but explicitly reads and discards everything in the
+;; port up to an EOF before closing it. This is necessary when reusing a single
+;; HTTP connection from net/http-client, since reads draw from a single
+;; underlying port.
+(define (consume-and-close-input-port in)
+  (define s (make-bytes 4096))
+  (let loop ()
+    (if (eof-object? (read-bytes-avail! s in))
+        (close-input-port in)
+        (loop))))
+
+;; -----------------------------------------------------------------------------
+
+(define (attributes-ref attrs name [failure-result
+                                    (λ ()
+                                      (raise-arguments-error
+                                       'attributes-ref
+                                       "no such attribute with name"
+                                       (if (element? attrs) "element" "attrs") attrs
+                                       "name" name))])
+  (or (for/or ([attr (in-list (if (element? attrs)
+                                  (element-attributes attrs)
+                                  attrs))])
+        (and (eq? (attribute-name attr) name)
+             (attribute-value attr)))
+      (if (procedure? failure-result)
+          (failure-result)
+          failure-result)))
+
+(define (attributes-ref/bool attrs name)
+  (and (attributes-ref attrs name #f) #t))
+
+(define (element-string-content e)
+  (match (element-content e)
+    ['()                  ""]
+    [(list (? pcdata? c)) (pcdata-string c)]))
+
+(struct form-info (method action-path fields) #:transparent)
+
+(define (form-info-fields-set form . args)
+  (struct-copy form-info form
+               [fields (apply hash-set* (form-info-fields form) args)]))
+
+(define (collect-form-info e)
+  (define action-str (attributes-ref e 'action))
+  (define action-url (string->url action-str))
+
+  (unless (or (not (url-host action-url))
+              (string=? (url-host action-url) PKGN-HOST))
+    (panic! #:name 'collect-form-info "unexpected form action"
+            #:fields (list (cons "action" action-str))))
+
+  (form-info
+   (match (string-downcase (attributes-ref e 'method))
+     ["post" #"POST"]
+     [method (panic! #:name 'collect-form-info "unknown form method"
+                     #:fields (list (cons "method" method)))])
+
+   (get-pkgn-relative-path "form action" (attributes-ref e 'action))
+   
+   (let loop ([e e]
+              [fields (hash)])
+     (if (element? e)
+         (match (element-name e)
+           ['input
+            (match (attributes-ref e 'type)
+              ["checkbox"
+               (hash-set fields
+                         (attributes-ref e 'name)
+                         (attributes-ref/bool e 'checked))]
+              ["text"
+               (hash-set fields
+                         (attributes-ref e 'name)
+                         (attributes-ref e 'value ""))])]
+           ['textarea
+            (hash-set fields
+                      (attributes-ref e 'name)
+                      (element-string-content e))]
+           ['select
+            (hash-set fields
+                      (attributes-ref e 'name)
+                      (find-default-select-value (element-content e)))]
+           [_
+            (foldl loop fields (element-content e))])
+         fields))))
+
+(struct select-option-info (selected? value) #:transparent)
+
+(define (collect-select-options es)
+  (for/list ([e (in-list es)])
+    (unless (and (element? e)
+                 (eq? (element-name e) 'option))
+      (raise-arguments-error 'collect-selection-options
+                             "child of <select> is not an <option> element"
+                             "child" e))
+    (select-option-info
+     (attributes-ref/bool e 'selected)
+     (attributes-ref e 'value (λ () (element-string-content e))))))
+
+(define (find-default-select-value es)
+  (match (collect-select-options es)
+    ['()  ""]
+    [opts (select-option-info-value
+           (or (findf select-option-info-selected? opts)
+               (first opts)))]))
+
+;; -----------------------------------------------------------------------------
+
+(struct edit:add-version-exception (version) #:transparent)
+(struct edit:package-source
+  (version      ; known-racket-version?
+   url          ; string?
+   create-mode) ; (or/c 'create 'update 'create/update)
+  #:transparent)
+
+(define (package-source-field-name version field)
+  (~a "version__" (or version 'default) "__" field))
+
+(define (edit-package #:session [session-id (current-pkgn-session-id)]
+                      #:package package-name
+                      #:actions actions)
+  (define cookie-header (string-append "Cookie: pltsession=" session-id))
+
+  (with-resources ([() (make-custodian-resource)]
+                   [conn (make-http-conn-resource)])
+    (log-pkgn-cli-info "edit-package ~v" package-name)
+    (http-conn-open! conn PKGN-HOST #:ssl? #t #:auto-reconnect? #t)
+
+    (define (do-request path
+                        #:method [method #"GET"]
+                        #:form-data [form-data #f])
+      (define-values [response-status response-headers response-in]
+        (http-conn-sendrecv!
+         conn path
+         #:method method
+         #:headers (list* "Accept: text/html"
+                          cookie-header
+                          "Connection: keep-alive"
+                          (if form-data
+                              (list "Content-Type: application/x-www-form-urlencoded")
+                              '()))
+         #:data (and form-data
+                     (alist->form-urlencoded
+                      (for/list ([(k v) (in-immutable-hash form-data)])
+                        (cons (string->uninterned-symbol k) v))))))
+
+      (define (bad-status)
+        (panic! "received non-OK response from server"
+                #:fields (list (cons "path" path)
+                               (cons "status" response-status))))
+
+      (match (regexp-match #px#"^HTTP/[0-9]+\\.[0-9]+ ([0-9]{3}) " response-status)
+        [(list _ status-code-bytes)
+         (define status-code (string->number (bytes->string/utf-8 status-code-bytes)))
+         (match status-code
+           [200
+            response-in]
+
+           [(or 301 302 303)
+            (consume-and-close-input-port response-in)
+            (define new-path (for/or ([header (in-list response-headers)])
+                               (match (regexp-match #px#"^(?i:Location): +(.+)$" header)
+                                 [(list _ new-path-bytes)
+                                  (bytes->string/utf-8 new-path-bytes)]
+                                 [_ #f])))
+            (unless new-path
+              (panic! (~a "received " status-code " response without Location header")))
+
+            (do-request (get-pkgn-relative-path "redirect" new-path))]
+
+           [_ (bad-status)])]
+        [_ (bad-status)]))
+
+    (define (do-form-request form)
+      (do-request (form-info-action-path form)
+                  #:method (form-info-method form)
+                  #:form-data (form-info-fields form)))
+
+    (define (read-edit-page in)
+      (begin0
+        (find-edit-form (read-xml/document in))
+        (consume-and-close-input-port in)))
+
+    (define (find-edit-form doc)
+      (collect-form-info
+       (let/ec escape
+         (let recur ([e (document-element doc)])
+           (when (element? e)
+             (if (and (eq? (element-name e) 'form)
+                      (equal? (attributes-ref e 'id #f) "edit-package-form"))
+                 (escape e)
+                 (for-each recur (element-content e)))))
+         (panic! #:name 'edit-package "could not find form in response"))))
+
+    (let loop ([actions actions]
+               [form (read-edit-page (do-request (build-pkgn-path "package" package-name "edit")))])
+
+      (define (version-exception-exists? version)
+        (hash-has-key? (form-info-fields form)
+                       (package-source-field-name version 'type)))
+
+      (match actions
+        ['()
+         (log-pkgn-cli-info " save-changes")
+         (close-input-port (do-form-request (form-info-fields-set form "action" "save_changes")))]
+
+        [(cons action actions)
+         (match action
+           [(edit:package-source version url create-mode)
+            (define (do-create)
+              (loop (list* (edit:add-version-exception version)
+                           (edit:package-source version url 'update)
+                           actions)
+                    form))
+
+            (define (do-update)
+              (loop actions
+                    (form-info-fields-set
+                     form
+                     (package-source-field-name version 'type) "simple"
+                     (package-source-field-name version 'simple_url) url)))
+
+            (match create-mode
+              ['create        (do-create)]
+              ['create/update (if (version-exception-exists? version)
+                                  (do-update)
+                                  (do-create))]
+              ['update        (if (version-exception-exists? version)
+                                  (do-update)
+                                  (panic! #:name 'edit-package-source
+                                          "no exception defined for version"
+                                          #:fields (list (cons "version" version))))])]
+
+           [(edit:add-version-exception version)
+            (when (version-exception-exists? version)
+              (panic! #:name 'add-version-exception
+                      "exception already exists for version"
+                      #:fields (list (cons "version" version))))
+
+            (log-pkgn-cli-info " add-version-exception ~v" version)
+            (loop actions
+                  (read-edit-page
+                   (do-form-request (form-info-fields-set
+                                     form
+                                     "action" "add_version"
+                                     "new_version" version))))])]))))
+
+(define (edit-version-exceptions #:session [session-id (current-pkgn-session-id)]
+                                 #:package package-name
+                                 #:versions versions
+                                 #:source source-url
+                                 #:mode [mode 'create/update])
+  (edit-package
+   #:session session-id
+   #:package package-name
+   #:actions (for/list ([version (in-list versions)])
+               (edit:package-source version source-url mode))))
+
+;; -----------------------------------------------------------------------------
+
+(module+ main
+  (require racket/cmdline
+           racket/logging
+           racket/path)
+
+  (define quiet? #f)
+
+  (define-values [command command-args]
+    (command-line
+     #:once-each
+     [("--session")
+      session-id
+      "A ‘pltsession’ cookie value used to authenticate."
+      (current-pkgn-session-id session-id)]
+     [("-q" "--quiet")
+      "Suppress informational (non-error) output."
+      (set! quiet? #t)]
+     #:args (command . command-arg) (values command command-arg)))
+
+  (unless (current-pkgn-session-id)
+    (panic! "missing required option ‘--session’"))
+
+  (define program+command-name (~a (file-name-from-path (find-system-path 'run-file))
+                                   " " command))
+
+  (define (go-edit-version-exceptions mode)
+    (command-line
+     #:program program+command-name
+     #:argv command-args
+     #:args (package-name version-spec source-url)
+     (edit-version-exceptions #:package package-name
+                              #:versions (parse-version-spec version-spec)
+                              #:source source-url
+                              #:mode mode)))
+
+  (define (go)
+    (match command
+      ["create-version-exceptions"           (go-edit-version-exceptions 'create)]
+      ["update-version-exceptions"           (go-edit-version-exceptions 'update)]
+      ["create-or-update-version-exceptions" (go-edit-version-exceptions 'create/update)]
+      [_
+       (panic! (format "invalid command ~v" command))]))
+
+  (if quiet?
+      (go)
+      (with-logging-to-port (current-error-port) go
+        #:logger pkgn-cli-logger 'info)))

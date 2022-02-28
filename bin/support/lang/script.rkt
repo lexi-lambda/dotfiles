@@ -30,6 +30,8 @@
      (newline (current-error-port))]
     [(exn:fail:panic? exn)
      (displayln message (current-error-port))]
+    [(exn:fail:user? exn)
+     (super message exn)]
     [else
      (super (~a run-file-sym ": uncaught exception;\n" (string-prefix-lines message " ")) exn)]))
 

@@ -97,9 +97,12 @@
    #:declare super-prop (expr/c #'struct-type-property? #:name "#:super argument")
    #:declare super-proc (expr/c #'(-> any/c any/c) #:name "#:super argument")
    #:fail-unless (or (attribute name)
-                     (and (attribute property-id) (attribute predicate-id) (attribute accessor-id)))
-   (~a "Either a name identifier must be specified, or #:property-id, #:predicate-id, and "
-       "#:accessor-id options must all be provided")
+                     (and (attribute property-id)
+                          (attribute predicate-id)
+                          (attribute accessor-id)
+                          (attribute reflection-name)))
+   (~a "Either a name identifier must be specified, or #:property-id, #:predicate-id, "
+       "#:accessor-id, and #:reflection-name options must all be provided")
    #:with {~var prop:name} (or (attribute property-id) (~id/1 "prop:" #'name))
    #:with name? (or (attribute predicate-id) (~id/1 #'name "?"))
    #:with name-ref (or (attribute accessor-id) (~id/1 #'name "-ref"))
