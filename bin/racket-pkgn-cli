@@ -196,7 +196,7 @@
   (with-resources ([() (make-custodian-resource)]
                    [conn (make-http-conn-resource)])
     (log-pkgn-cli-info "edit-package ~v" package-name)
-    (http-conn-open! conn PKGN-HOST #:ssl? #t #:auto-reconnect? #t)
+    (http-conn-open! conn PKGN-HOST #:ssl? 'secure #:auto-reconnect? #t)
 
     (define (do-request path
                         #:method [method #"GET"]
