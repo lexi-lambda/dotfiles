@@ -98,12 +98,6 @@
                                           (hash-ref stamps-b path)))
                         unchanged-paths))))
 
-(let ([super (uncaught-exception-handler)])
-  (uncaught-exception-handler
-   (λ (exn)
-     (when (exn:break? exn) (newline) (exit))
-     (super exn))))
-
 (let ([starting-paths (paths-to-watch)])
   (let loop ([watched-paths starting-paths]
              [watched-paths-stamps (paths-timestamps starting-paths)])
@@ -114,10 +108,11 @@
         (let* ([cust (make-custodian)]
                [rebuild-evt
                 (parameterize ([current-custodian cust])
-                  (choice-evt (wrap-evt (paths-change-evt watched-paths) (const 'file-changed))
-                              (wrap-evt (read-line-evt (current-input-port)) (const 'enter))))])
+                  (choice-evt (handle-evt (paths-change-evt watched-paths) (const 'file-changed))
+                              (handle-evt (read-line-evt (current-input-port))
+                                          (λ (line) (if (eof-object? line) (exit) 'enter)))))])
           (when display-message?
-            (displayln "Watching for changes; press Enter to force a rebuild."))
+            (displayln "Watching for changes; press Enter to force a rebuild." (current-error-port)))
           (let ([rebuild-request (sync rebuild-evt)])
             (custodian-shutdown-all cust)
             (let* ([new-paths (paths-to-watch)]
