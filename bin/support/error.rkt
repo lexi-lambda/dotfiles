@@ -41,7 +41,7 @@
                                            (λ () (super exn)))]))))
 
 (define current-panic-message-prefix (make-parameter #f))
-(define current-panic-exit-code (make-parameter #f))
+(define current-panic-exit-code (make-parameter 1))
 
 (define (panic! #:name [name #f] main-message [continued-message #f]
                 #:fields [fields '()]
