@@ -5,19 +5,35 @@
          gregor/period
          racket/format
          racket/list
-         racket/match)
+         racket/match
+         racket/port
+         "support/resource.rkt")
+
+(define current-timestamp-mode (make-parameter 'absolute))
+(define current-timestamp-precision (make-parameter 'seconds))
+(define current-timestamp-output-buffer-limit (make-parameter +inf.0))
 
 (define (~r/2 v) (~r v #:min-width 2 #:pad-string "0"))
+(define (~r/3 v) (~r v #:min-width 3 #:pad-string "0"))
 
-(define (timestamp start-time #:current-time [current-time (now)] #:mode mode)
+(define (timestamp start-time
+                   #:current-time [current-time (now)]
+                   #:mode [mode (current-timestamp-mode)]
+                   #:precision [precision (current-timestamp-precision)])
   (define (absolute-timestamp)
-    (~t current-time "HH:mm:ss"))
+    (~t current-time
+        (match precision
+          ['seconds      "HH:mm:ss"]
+          ['milliseconds "HH:mm:ss.SSS"])))
 
   (define (relative-timestamp)
     (define current-period (time-period-between start-time current-time))
     (~a "+" (~r/2 (period-ref current-period 'hours))
         ":" (~r/2 (period-ref current-period 'minutes))
-        ":" (~r/2 (period-ref current-period 'seconds))))
+        ":" (~r/2 (period-ref current-period 'seconds))
+        (match precision
+          ['seconds      ""]
+          ['milliseconds (~a "." (~r/3 (period-ref current-period 'milliseconds)))])))
 
   (define timestamp-str
     (match mode
@@ -27,81 +43,111 @@
 
   (~a "[" timestamp-str "]"))
 
-(define (timestamp-lines #:mode mode
+(define (timestamp-lines #:mode [mode (current-timestamp-mode)]
+                         #:precision [precision (current-timestamp-precision)]
                          #:input [in (current-input-port)]
-                         #:output [out (current-output-port)]
-                         #:close? [close? #t])
-  (define start-time (now))
-  (define (current-timestamp)
-    (timestamp start-time #:mode mode))
-  (define (write-timestamp [str (current-timestamp)])
-    (write-string str out)
-    (write-string " " out))
+                         #:output [orig-out (current-output-port)]
+                         #:output-buffer-limit [output-buffer-limit (current-timestamp-output-buffer-limit)])
+  (define (go out)
+    (define start-time (now))
+    (define (current-timestamp)
+      (timestamp start-time #:mode mode #:precision precision))
+    (define (write-timestamp [str (current-timestamp)])
+      (write-string str out)
+      (write-string " " out))
 
-  (define buffer (make-bytes 512))
+    (define buffer (make-bytes 4096))
 
-  (for/fold ([at-start-of-line? #t]
-             #:result (void))
-            ([num-bytes (in-producer (λ () (read-bytes-avail! buffer in)) eof-object?)])
-    (match-define (cons first-line other-lines) (regexp-split #rx#"\n" buffer 0 num-bytes))
-    (when at-start-of-line?
-      (write-timestamp))
-    (write-bytes first-line out)
-    (cond
-      [(empty? other-lines)
-       #f]
-      [else
-       (newline out)
-       (define last-line
-         (match other-lines
-           [(list only-line)
-            only-line]
-           [(list middle-lines ... last-line)
-            (define timestamp-str (timestamp start-time #:mode mode))
-            (for ([line (in-list middle-lines)])
-              (write-timestamp timestamp-str)
-              (write-bytes line out)
-              (newline out))
-            last-line]))
-       (cond
-         [(zero? (bytes-length last-line))
-          #t]
-         [else
-          (write-timestamp)
-          (write-bytes last-line out)
-          #f])]))
+    (for/fold ([at-start-of-line? #t]
+               #:result (void))
+              ([num-bytes (in-producer (λ () (read-bytes-avail! buffer in)) eof-object?)])
+      (match-define (cons first-line other-lines) (regexp-split #rx#"\n" buffer 0 num-bytes))
+      (when at-start-of-line?
+        (write-timestamp))
+      (write-bytes first-line out)
+      (cond
+        [(empty? other-lines)
+         #f]
+        [else
+         (newline out)
+         (define last-line
+           (match other-lines
+             [(list only-line)
+              only-line]
+             [(list middle-lines ... last-line)
+              (define timestamp-str (current-timestamp))
+              (for ([line (in-list middle-lines)])
+                (write-timestamp timestamp-str)
+                (write-bytes line out)
+                (newline out))
+              last-line]))
+         (cond
+           [(zero? (bytes-length last-line))
+            #t]
+           [else
+            (write-timestamp)
+            (write-bytes last-line out)
+            #f])])))
 
-  (when close?
-    (close-output-port out)))
+  (cond
+    [(zero? output-buffer-limit)
+     (go orig-out)]
+    [else
+     (with-resources ([(buffered-out-in buffered-out-out)
+                       (make-pipe-resource #:limit (if (eqv? output-buffer-limit +inf.0)
+                                                       #f
+                                                       output-buffer-limit))])
+       (define worker (thread (λ () (copy-port buffered-out-in orig-out))))
+       (go buffered-out-out)
+       (close-output-port buffered-out-out)
+       (thread-wait worker))]))
 
 (module+ main
   (require racket/cmdline)
-
-  (define mode 'absolute)
 
   (command-line
    #:usage-help
    "Prints each line of stdin to stdout, prefixed with a timestamp."
    #:once-any
    ["--absolute"
-    "Print absolute timestamps using the system clock (default)"
-    (set! mode 'absolute)]
+    "Print absolute timestamps using the system clock. (default)"
+    (current-timestamp-mode 'absolute)]
    ["--relative"
-    "Print timestamps relative to process startup"
-    (set! mode 'relative)]
+    "Print timestamps relative to process startup."
+    (current-timestamp-mode 'relative)]
    ["--both"
-    "Print both absolute and relative timestamps"
-    (set! mode 'both)])
+    "Print both absolute and relative timestamps."
+    (current-timestamp-mode 'both)]
+   #:once-each
+   ["--millis"
+    "Print timestamps with millisecond precision."
+    (current-timestamp-precision 'milliseconds)]
+   #:once-any
+   ["--unlimited-output-buffer"
+    "Buffer an arbitrary amount of output. (default)"
+    (current-timestamp-output-buffer-limit +inf.0)]
+   ["--limit-output-buffer"
+    num-bytes
+    ("Limit the output buffer to <num-bytes> bytes. A limit of 0"
+     "disables additional output buffering beyond any buffering"
+     "inherent in the output port."
+     ""
+     "Using a limited output buffer is usually a bad idea: if the"
+     "buffer fills up, further input will not be read until the"
+     "output is consumed, so future timestamps will not be accurate."
+     "However, disabling output buffering is necessary if the input"
+     "is demand-driven.")
+    (unless (regexp-match? #px"^[0-9]+$" num-bytes)
+      (raise-user-error 'limit-output-buffer "argument must be a non-negative integer"))
+    (current-timestamp-output-buffer-limit (string->number num-bytes))])
 
-  (timestamp-lines #:mode mode))
+  (timestamp-lines))
 
 (module+ test
   (require (for-syntax racket/base)
-           racket/port
            racket/stxparam
            rackunit
-           syntax/parse/define
-           "support/resource.rkt")
+           syntax/parse/define)
 
   (define (read-all-bytes-avail in
                                 [initial-buffer-size 256]
@@ -149,7 +195,8 @@
   (define-rename-transformer-parameter advance-clock! (make-rename-transformer #'test-case-keyword))
   (define-rename-transformer-parameter write+read! (make-rename-transformer #'test-case-keyword))
 
-  (define (make-timestamp-lines-resource #:mode mode)
+  (define (make-timestamp-lines-resource #:mode [mode (current-timestamp-mode)]
+                                         #:precision [precision (current-timestamp-precision)])
     (make-resource
      #:name 'timestamp-lines
      #:wrapper
@@ -169,17 +216,24 @@
                                  `#s(timeout ,avail)
                                  avail)))))
          (with-resources ([advance-clock!-proc clock-resource])
-           (thread (λ () (timestamp-lines #:mode mode #:input stdin-in #:output stdout-out)))
+           (thread (λ ()
+                     (timestamp-lines #:mode mode #:precision precision
+                                      #:input stdin-in #:output stdout-out)
+                     (close-output-port stdout-out)))
            (proc advance-clock!-proc write+read!-proc)
            (close-output-port stdin-out)
            (port->bytes stdout-in))))))
 
   (define-syntax-parser timestamp-lines-test-case
-    [(_ #:mode mode:expr body ...+)
+    [(_ {~alt {~once {~seq #:mode mode:expr}}
+              {~optional {~seq #:precision precision:expr}}}
+        ...
+        body ...+)
      #`(test-begin
         (define leftovers
           (with-resources ([(advance-clock!-proc write+read!-proc)
-                            (make-timestamp-lines-resource #:mode mode)])
+                            (make-timestamp-lines-resource #:mode mode
+                                                           {~? {~@ #:precision precision}})])
             (syntax-parameterize
                 ([advance-clock! (make-rename-transformer #'advance-clock!-proc)]
                  [write+read! (make-rename-transformer #'write+read!-proc)])
