@@ -2,6 +2,7 @@
 
 # DrRacket temp files
 *~
+\#*\#[0-9]\#
 
 # Ruby rbenv configuration files
 .rbenv-version
