@@ -8,11 +8,17 @@
       "base16-tomorrow-dark-theme"
     ]
   editor:
-    fontFamily: "Fira Code"
+    fontFamily: "Fira Code, monospace"
     scrollPastEnd: true
     softWrapAtPreferredLineLength: true
   "file-types":
+    "*.cmm": "source.c"
+    "*.dump-ds": "source.haskell"
+    "*.dump-simpl": "source.haskell"
+    "*.dump-spec": "source.haskell"
+    "bytearray-ops.txt*": "source.haskell"
     "cabal.project*": "source.cabal"
+    "primops.txt*": "source.haskell"
   "vim-mode-plus":
     groupChangesWhenLeavingInsertMode: false
     useClipboardAsDefaultRegister: false
