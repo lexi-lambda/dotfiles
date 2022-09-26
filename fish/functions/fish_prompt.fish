@@ -4,6 +4,9 @@ function fish_prompt
   set -l command_status $status
   set -l question_mark_in_circle '?'\u20dd
 
+  set -l color_orange (set_color DE935F brred) # base16 color 09
+  set -l color_brown (set_color A3685A)        # base16 color 0F
+
   # print hostname if client is remote
   set_color red
   if set -q SSH_TTY
@@ -49,12 +52,12 @@ function fish_prompt
           set_color red; echo -n "↓$git_commits_behind"
         end
         if [ "$git_commits_ahead" -gt 0 ]
-          set_color brred; echo -n "↑$git_commits_ahead"
+          echo -n "$color_orange↑$git_commits_ahead"
         end
       end
     else
       # otherwise, indicate that an upstream is unknown
-      set_color brred; echo -n "$question_mark_in_circle"
+      echo -n "$color_orange$question_mark_in_circle"
     end
 
     set -l git_branch (git branch 2>/dev/null | sed -n '/\* /s///p')
@@ -62,7 +65,7 @@ function fish_prompt
       set_color blue; echo -n ' ['
       # color the branch name differently if the working tree is dirty
       if [ (count (git status --porcelain)) -gt 0 ]
-        set_color brred
+        echo -n "$color_orange"
       else
         set_color yellow
       end
@@ -72,7 +75,7 @@ function fish_prompt
   end
 
   if [ "$command_status" -eq 0 ]
-    set_color brcyan; echo -n 'λ: '
+    echo -n $color_brown'λ: '
   else
     set_color red; echo -n 'λ! '
   end
