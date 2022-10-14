@@ -3,6 +3,8 @@ xkb_symbols "typography" {
   include "us(basic)"
   name[Group1]= "English (US, Typography)";
 
+  key <AE06> { [ 6, asciicircum, section ] };
+  key <AE08> { [ 8, asterisk, enfilledcircbullet, degree ] };
   key <AE11> { [ minus, underscore, endash, emdash ] };
 
   key <AD03> { [ e, E, dead_acute ] };
